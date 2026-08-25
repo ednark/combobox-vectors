@@ -1,0 +1,16 @@
+{
+  "name": "combobox-vectors",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "USWDS combo-box with client-side semantic vector search",
+  "scripts": {
+    "precompute": "node scripts/precompute.mjs",
+    "verify-queries": "node scripts/verify-queries.mjs",
+    "eval:embedders": "node scripts/eval-embedders.mjs",
+    "eval:metaphone": "node scripts/eval-metaphone.mjs"
+  },
+  "devDependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  }
+}

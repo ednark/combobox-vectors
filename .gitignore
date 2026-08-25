@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Downloaded model cache (scripts/eval-embedders.mjs, scripts/precompute.mjs)
+.cache/
+
+# OS/editor
+.DS_Store
+*.swp
+*~

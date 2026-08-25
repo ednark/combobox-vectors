@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>combobox-vectors — USWDS combo-box with semantic vector search</title>
+  <link rel="icon" href="assets/favicon.ico" sizes="any">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <meta name="theme-color" content="#98260E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+  <!-- USWDS CSS only (no uswds.min.js); the combo-box behavior is driven by vector-combobox.js -->
+  <link rel="stylesheet" href="https://unpkg.com/@uswds/uswds@3.7.1/dist/css/uswds.min.css">
+  <style>
+    /* ---- Page scaffold ---- */
+    body {
+      font-family: 'Source Sans 3', 'Source Sans Pro', -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 0; padding: 2rem; background: #f5f5f5; color: #1b1b1b;
+    }
+    .wrap { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0; }
+    .tagline { font-size: 1.1rem; color: #5c5c5c; margin-bottom: 2rem; }
+
+    /* ---- Sections ---- */
+    .section {
+      background: #fff; border: 1px solid #dfe1e2; border-radius: .25rem;
+      padding: 2rem; margin-bottom: 2rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    }
+    .section-header {
+      font-size: 1.25rem; font-weight: 700; margin-bottom: 1rem;
+      padding-bottom: .5rem; border-bottom: 2px solid #dfe1e2;
+    }
+
+    /* ---- Two-column layouts (flex) ---- */
+    .demo-grid { display: flex; gap: 2rem; }
+    .demo-grid > div { flex: 1; min-width: 0; } /* equal columns, allow shrink */
+    @media (max-width: 768px) {
+      .demo-grid { flex-direction: column; }
+    }
+
+    /* ---- Config section (full width inside its card) ---- */
+    .config-row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .config-label { font-size: 1rem; font-weight: 600; }
+    .config-cell { flex: 1; min-width: 0; }
+
+    /* ---- Toggle switch ---- */
+    .toggle-switch { position: relative; display: inline-block; width: 48px; height: 24px; flex-shrink: 0; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #c9c9c9; transition: .2s; border-radius: 24px;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,.15);
+    }
+    .toggle-slider::before {
+      content: ""; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px;
+      background-color: #fff; transition: .2s; border-radius: 50%;
+      box-shadow: 0 1px 2px rgba(0,0,0,.2);
+    }
+    .toggle-switch input:checked + .toggle-slider { background-color: #005ea2; }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(24px); }
+    .toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid #1a4480; outline-offset: 2px; }
+    .toggle-status { font-size: .85rem; color: #5c5c5c; }
+
+    /* ---- Example chips ---- */
+    .examples-group-label { display: block; font-size: .95rem; color: #3c3c3c; margin-bottom: .5rem; }
+    .examples { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+    .example-chip {
+      font: inherit; font-size: .9rem; line-height: 1.4;
+      background: #fff; color: #005ea2;
+      border: 1px solid #005ea2; border-radius: 999px;
+      padding: .2rem .75rem; cursor: pointer;
+    }
+    .example-chip:hover { background: #005ea2; color: #fff; }
+    .example-chip:active { background: #1a4480; border-color: #1a4480; color: #fff; }
+    .example-chip:focus-visible { outline: 2px solid #1a4480; outline-offset: 2px; }
+
+    /* ---- Selection preview ---- */
+    .picked { margin-top: 1.5rem; padding: 1rem; background: #ecf3ff; border-left: 4px solid #005ea2; }
+    .picked:empty { display: none; }
+    .vectortext { font-size: .85rem; color: #5c5c5c; margin-top: .25rem; line-height: 1.45; }
+    .fulltext-toggle {
+      font: inherit; font-size: .85rem;
+      background: none; border: none; padding: 0; margin-left: .25rem;
+      color: #005ea2; text-decoration: underline; cursor: pointer;
+    }
+    .fulltext-toggle:focus-visible { outline: 2px solid #1a4480; outline-offset: 2px; }
+    .fulltext {
+      margin-top: .5rem; padding: .75rem;
+      background: #f8f8f8; border: 1px solid #dfe1e2; border-radius: .25rem;
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 20rem; overflow-y: auto;
+    }
+
+    /* ---- Prose sections ---- */
+    .explain-section p,
+    .explain-section ul { line-height: 1.6; color: #3c3c3c; }
+    .explain-section p { margin-bottom: 1rem; }
+    .explain-section ul { margin: 0 0 1rem 1.5rem; }
+    .explain-section li { margin-bottom: .5rem; }
+    .tradeoff-section h3 { font-size: 1.1rem; font-weight: 700; margin: 1.25rem 0 .75rem; }
+    .tradeoff-section h3:first-of-type { margin-top: 0; }
+    .tradeoff-section p,
+    .tradeoff-section ul { line-height: 1.6; color: #3c3c3c; margin: 0 0 1rem; }
+    .tradeoff-section ul { margin-left: 1.5rem; }
+    .tradeoff-section li { margin-bottom: .5rem; }
+    code { background: #f0f0f0; padding: .1rem .3rem; border-radius: .2rem; font-size: .9em; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>combobox-vectors</h1>
+    <p class="tagline">A USWDS combo-box whose filtering is driven by client-side semantic vector search.</p>
+
+    <!-- Demo: two comboboxes side by side -->
+    <div class="demo-grid">
+      <div class="section">
+        <div class="section-header">Policy Document Search</div>
+        <form class="usa-form">
+          <label class="usa-label" for="policy">Find a policy document</label>
+          <div class="usa-combo-box" id="policy-box">
+            <select id="policy" name="policy" class="usa-select"></select>
+          </div>
+          <div id="picked-policy" class="picked" aria-live="polite"></div>
+        </form>
+      </div>
+
+      <div class="section">
+        <div class="section-header">FOIA Agency Selector</div>
+        <form class="usa-form">
+          <label class="usa-label" for="agency">Which agency handles your request?</label>
+          <div class="usa-combo-box" id="agency-box">
+            <select id="agency" name="agency" class="usa-select"></select>
+          </div>
+          <div id="picked-agency" class="picked" aria-live="polite"></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Config & examples: toggle full width, chips in two columns -->
+    <div class="section">
+      <div class="section-header">Configuration &amp; Examples</div>
+      <div class="demo-grid">
+        <div class="config-cell">
+          <div class="config-row">
+            <span class="config-label">Vector search:</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="vector-toggle" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <span class="toggle-status" id="toggle-status">On — hybrid ranking</span>
+        </div>
+        <div class="config-cell">
+          <div class="config-row">
+            <span class="config-label">Precomputed embeddings:</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="precompute-toggle" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <span class="toggle-status" id="precompute-status">On — build-time vectors</span>
+        </div>
+      </div>
+      <div class="demo-grid" style="margin-top:1.5rem;">
+        <div>
+          <span class="examples-group-label">Policy doc examples:</span>
+          <div class="examples" role="group" aria-label="Example search phrases for policy documents">
+            <button type="button" class="example-chip" data-target="policy">hackers stealing data</button>
+            <button type="button" class="example-chip" data-target="policy">October</button>
+            <button type="button" class="example-chip" data-target="policy">clear simple language</button>
+            <button type="button" class="example-chip" data-target="policy">publishing datasets as APIs</button>
+          </div>
+        </div>
+        <div>
+          <span class="examples-group-label">FOIA agency examples:</span>
+          <div class="examples" role="group" aria-label="Example search phrases for FOIA agencies">
+            <button type="button" class="example-chip" data-target="agency">I need my medical records from the VA</button>
+            <button type="button" class="example-chip" data-target="agency">airport security procedures</button>
+            <button type="button" class="example-chip" data-target="agency">workplace safety violations</button>
+            <button type="button" class="example-chip" data-target="agency">border crossing logs</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- How it works (separate section) -->
+    <div class="section explain-section">
+      <div class="section-header">How It Works</div>
+      <p>The options are real federal policy documents and government agencies with deliberately <strong>opaque titles</strong> — numbers, acronyms, and department names that substring typeahead cannot structurally match to user intent. Ranking runs two retrieval channels and fuses them:</p>
+      <ul>
+        <li><strong>Dense</strong>: cosine similarity between the query embedding and each option's <code>vectorText</code> embedding (keywords + summary body — text the user never sees). Captures topical similarity: "hackers stealing data" → <code>OMB M-22-09</code>. Both embeddings are computed client-side with the same model, guaranteeing a shared vector space.</li>
+        <li><strong>Sparse</strong>: BM25 with IDF weighting over the title (boosted ×3) and <code>vectorText</code>, with each token indexed both exactly and as a <strong>metaphone phonetic key</strong> — so typo'd queries ("recods", "secuirty") still collide with the intended term. Captures exact tokens the dense channel is blind to — dates, numbers, proper nouns: "October" → <code>EO 14110 (October 2023)</code>.</li>
+      </ul>
+      <p>The two ranked lists are fused with <strong>Reciprocal Rank Fusion</strong> (<code>Σ 1/(60 + rank)</code> per channel — the same default used by Elasticsearch 8 and OpenSearch for hybrid queries). Rank-based fusion needs no score normalization: BM25 is unbounded while cosine is 0..1, and RRF sidesteps the mismatch entirely. The sparse channel is always live; the dense channel is a progressive enhancement. Toggle the switch above to isolate either mode.</p>
+    </div>
+
+    <!-- Tradeoffs (separate section) -->
+    <div class="section tradeoff-section">
+      <div class="section-header">Tradeoffs &amp; Applicability</div>
+      <h3>The cost of client-side inference</h3>
+      <p>This demo runs an embedding model (<code>minishlab/potion-base-4M</code>, a Model2Vec static embedder, 15.1 MB ONNX) entirely in the browser via WASM — chosen by a <a href='#' onclick='return false' title='npm run eval:embedders'>corpus-relative evaluation</a> where it beat the previous contextual transformer baseline while running inference as a single embedding lookup. No server round-trip, no embedding API, no query text leaving the device — but every user pays a one-time download per site per browser. Browser cache partitioning means the bytes aren't shared across origins, so each site re-pays the cost even for users who've downloaded the model elsewhere. On repeat visits the cached model loads in milliseconds; on a first visit over metered mobile data, it's a real cost.</p>
+      <h3>Strong fit</h3>
+      <ul>
+        <li><strong>High-frequency internal tools</strong> — the download amortizes to zero across daily sessions. If your users open the combobox twenty times a day, 15 MB once is noise.</li>
+        <li><strong>Opaque label domains</strong> — program codes, legal citations, clinical terminology, agency names. Classic pattern: the user knows the <em>concept</em> but not the <em>label</em>. Substring typeahead fails structurally here; semantic ranking solves exactly this mismatch. The FOIA selector above is the canonical case: "who has my medical records?" → VA.</li>
+        <li><strong>Privacy or compliance boundaries</strong> — HIPAA, CJIS, air-gapped networks, or any context where shipping the query to an embedding API is a non-starter. Local inference keeps the data path entirely on-device.</li>
+        <li><strong>Zero-backend deployments</strong> — static sites, GitHub Pages, offline-first PWAs. Works with no search infrastructure and continues working offline after first load.</li>
+      </ul>
+      <h3>Poor fit</h3>
+      <ul>
+        <li><strong>Single-visit public pages</strong> — the download never amortizes. You're taxing the 99% who won't return for the benefit of the 1% who might.</li>
+        <li><strong>Small option sets</strong> — below roughly ten options, users can scan the full list faster than they can type. A native select or plain typeahead is both cheaper and better UX.</li>
+        <li><strong>Bandwidth-constrained contexts</strong> — 15 MB is 15 MB, cached or not, on first load.</li>
+      </ul>
+      <h3>Mitigations built into this implementation</h3>
+      <ul>
+        <li><strong>BM25 runs unconditionally</strong> — the sparse index builds synchronously at init from the same data array. Zero network dependency, so the combobox is functional on first paint, not after model load.</li>
+        <li><strong>Progressive re-ranking</strong> — keyword results render immediately; when the dense model finishes loading, an open list is transparently re-ranked with RRF fusion. The upgrade is invisible unless you're watching for it.</li>
+        <li><strong>Explicit kill switch</strong> — <code>setDenseEnabled(false)</code> short-circuits ranking to BM25-only and skips model warmup entirely, so a fresh page with vectors disabled downloads zero model bytes. Use the toggle above to A/B the two channels.</li>
+      </ul>
+    </div>
+  </div>
+
+  <script type="module">
+    import { createVectorComboBox } from './vector-combobox.js';
+    import { DATA as POLICY_DATA } from './data.js';
+    import { AGENCY_DATA } from './data-agencies.js';
+    // Build-time embeddings (scripts/precompute.mjs) — same model as the
+    // query, so options skip runtime embedding; only the query is embedded.
+    import POLICY_EMB from './data.embeddings.json' with { type: 'json' };
+    import AGENCY_EMB from './data-agencies.embeddings.json' with { type: 'json' };
+
+    // Attach precomputed vectors to their items (items without a match fall
+    // back to runtime embedding inside the component).
+    const withEmbeddings = (data, emb) =>
+      data.map((item) => (emb[item.value] ? { ...item, embedding: emb[item.value] } : item));
+
+    const vectorToggle = document.getElementById('vector-toggle');
+    const toggleStatus = document.getElementById('toggle-status');
+    const pickedPolicy = document.getElementById('picked-policy');
+    const pickedAgency = document.getElementById('picked-agency');
+
+    const escapeHtml = (s) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    function renderPicked(container, item) {
+      if (!item) { container.innerHTML = ''; return; }
+      const preview = escapeHtml(item.vectorText.slice(0, 220));
+      const full = escapeHtml(item.vectorText);
+      container.innerHTML = `
+        <strong>${escapeHtml(item.text)}</strong>
+        <div class="vectortext">
+          Ranked by vector text: ${preview}…
+          <button type="button" class="fulltext-toggle" aria-expanded="false">full text</button>
+          <div class="fulltext" hidden>${full}</div>
+        </div>`;
+      const toggle = container.querySelector('.fulltext-toggle');
+      const fullEl = container.querySelector('.fulltext');
+      toggle.addEventListener('click', () => {
+        const expanded = toggle.getAttribute('aria-expanded') === 'true';
+        toggle.setAttribute('aria-expanded', String(!expanded));
+        fullEl.hidden = expanded;
+      });
+    }
+
+    const policyCb = createVectorComboBox(document.getElementById('policy-box'), {
+      data: withEmbeddings(POLICY_DATA, POLICY_EMB),
+      placeholder: 'Describe what you are looking for…',
+      threshold: 0.25,
+      maxResults: 15,
+      onChange: (value, item) => renderPicked(pickedPolicy, item),
+    });
+
+    const agencyCb = createVectorComboBox(document.getElementById('agency-box'), {
+      data: withEmbeddings(AGENCY_DATA, AGENCY_EMB),
+      placeholder: 'Describe your FOIA request…',
+      threshold: 0.25,
+      maxResults: 15,
+      onChange: (value, item) => renderPicked(pickedAgency, item),
+    });
+
+    // Vector search toggle controls both comboboxes.
+    vectorToggle.addEventListener('change', () => {
+      policyCb.setDenseEnabled(vectorToggle.checked);
+      agencyCb.setDenseEnabled(vectorToggle.checked);
+      toggleStatus.textContent = vectorToggle.checked
+        ? 'On — hybrid ranking'
+        : 'Off — keyword only';
+    });
+
+    // Precomputed-embeddings toggle: build-time vectors vs on-load runtime
+    // embedding of every option's vectorText. Same model either way, so the
+    // rankings are identical — the difference is the first-open cost.
+    const precomputeToggle = document.getElementById('precompute-toggle');
+    const precomputeStatus = document.getElementById('precompute-status');
+    precomputeToggle.addEventListener('change', () => {
+      policyCb.setUsePrecomputed(precomputeToggle.checked);
+      agencyCb.setUsePrecomputed(precomputeToggle.checked);
+      precomputeStatus.textContent = precomputeToggle.checked
+        ? 'On — build-time vectors'
+        : 'Off — runtime vectors';
+    });
+
+    // Example phrases — routed by data-target attribute.
+    document.querySelectorAll('.example-chip').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const isPolicy = btn.dataset.target === 'policy';
+        const cb = isPolicy ? policyCb : agencyCb;
+        const picker = isPolicy ? pickedPolicy : pickedAgency;
+        cb.setQuery(btn.textContent.trim());
+        picker.innerHTML = ''; // clear previous selection when using chips
+      });
+    });
+  </script>
+</body>
+</html>

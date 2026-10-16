@@ -44,6 +44,12 @@
     /* ---- Config section (full width inside its card) ---- */
     .config-row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
     .config-label { font-size: 1rem; font-weight: 600; }
+    .dense-source-select {
+      font-family: 'Source Sans 3', sans-serif; font-size: 0.95rem;
+      padding: 0.35rem 0.5rem; border: 1px solid #565c65; border-radius: 4px;
+      background: #fff; color: #1b1b1b; max-width: 100%;
+    }
+    .dense-source-select:focus-visible { outline: 4px solid #2491ff; outline-offset: 0; }
     .config-cell { flex: 1; min-width: 0; }
 
     /* ---- Toggle switch ---- */
@@ -145,13 +151,14 @@
       <div class="demo-grid">
         <div class="config-cell">
           <div class="config-row">
-            <span class="config-label">Vector search:</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="vector-toggle" checked>
-              <span class="toggle-slider"></span>
-            </label>
+            <label class="config-label" for="dense-source">Semantic channel:</label>
+            <select id="dense-source" class="dense-source-select">
+              <option value="table" selected>Static table (no model download)</option>
+              <option value="model">Embedding model in browser (~16 MB)</option>
+              <option value="off">Off (keyword only)</option>
+            </select>
           </div>
-          <span class="toggle-status" id="toggle-status">On — hybrid ranking</span>
+          <span class="toggle-status" id="toggle-status">Static table — semantic ranking with zero inference</span>
         </div>
         <div class="config-cell">
           <div class="config-row">
@@ -232,13 +239,19 @@
     // query, so options skip runtime embedding; only the query is embedded.
     import POLICY_EMB from './data.embeddings.json' with { type: 'json' };
     import AGENCY_EMB from './data-agencies.embeddings.json' with { type: 'json' };
+    // Static semantic tables (scripts/build-semantic-table.mjs): word -> per-option
+    // score matrices. Importing these costs ~200-350 KB of JSON and downloads NO
+    // model, no ONNX runtime and no tokenizer — the dense channel is ready on the
+    // first keystroke.
+    import POLICY_TABLE from './data.semantic.json' with { type: 'json' };
+    import AGENCY_TABLE from './data-agencies.semantic.json' with { type: 'json' };
 
     // Attach precomputed vectors to their items (items without a match fall
     // back to runtime embedding inside the component).
     const withEmbeddings = (data, emb) =>
       data.map((item) => (emb[item.value] ? { ...item, embedding: emb[item.value] } : item));
 
-    const vectorToggle = document.getElementById('vector-toggle');
+    const denseSourceSelect = document.getElementById('dense-source');
     const toggleStatus = document.getElementById('toggle-status');
     const pickedPolicy = document.getElementById('picked-policy');
     const pickedAgency = document.getElementById('picked-agency');
@@ -268,6 +281,7 @@
 
     const policyCb = createVectorComboBox(document.getElementById('policy-box'), {
       data: withEmbeddings(POLICY_DATA, POLICY_EMB),
+      table: POLICY_TABLE,
       placeholder: 'Describe what you are looking for…',
       threshold: 0.25,
       maxResults: 15,
@@ -276,6 +290,7 @@
 
     const agencyCb = createVectorComboBox(document.getElementById('agency-box'), {
       data: withEmbeddings(AGENCY_DATA, AGENCY_EMB),
+      table: AGENCY_TABLE,
       placeholder: 'Describe your FOIA request…',
       threshold: 0.25,
       maxResults: 15,
@@ -283,12 +298,18 @@
     });
 
     // Vector search toggle controls both comboboxes.
-    vectorToggle.addEventListener('change', () => {
-      policyCb.setDenseEnabled(vectorToggle.checked);
-      agencyCb.setDenseEnabled(vectorToggle.checked);
-      toggleStatus.textContent = vectorToggle.checked
-        ? 'On — hybrid ranking'
-        : 'Off — keyword only';
+    // Semantic channel: static table (no download), in-browser embedder, or off.
+    // `setDenseSource` only starts the model download when model mode is chosen.
+    const SOURCE_STATUS = {
+      table: 'Static table — semantic ranking with zero inference (~200-350 KB)',
+      model: 'In-browser embedder — downloads ~16 MB (model + ONNX runtime)',
+      off: 'Off — BM25 keyword ranking only, no download at all',
+    };
+    denseSourceSelect.addEventListener('change', () => {
+      const v = denseSourceSelect.value;
+      policyCb.setDenseSource(v === 'off' ? false : v);
+      agencyCb.setDenseSource(v === 'off' ? false : v);
+      toggleStatus.textContent = SOURCE_STATUS[v];
     });
 
     // Precomputed-embeddings toggle: build-time vectors vs on-load runtime
@@ -300,8 +321,8 @@
       policyCb.setUsePrecomputed(precomputeToggle.checked);
       agencyCb.setUsePrecomputed(precomputeToggle.checked);
       precomputeStatus.textContent = precomputeToggle.checked
-        ? 'On — build-time vectors'
-        : 'Off — runtime vectors';
+        ? 'On — build-time vectors (model mode only)'
+        : 'Off — runtime vectors (model mode only)';
     });
 
     // Example phrases — routed by data-target attribute.

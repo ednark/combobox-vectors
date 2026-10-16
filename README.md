@@ -93,6 +93,9 @@ download is not shared across origins — each site re-pays the cost. The
 mitigations are all variations on one principle: **the dense channel is a
 progressive enhancement, never a dependency.**
 
+- **A static table replaces the model entirely.** See the next section: ~200–350 KB
+  of JSON, no inference, correct on the first keystroke. This is now the demo's
+  default dense source.
 - **BM25 runs unconditionally.** The sparse index builds synchronously at init.
   The combo box is fully functional on first paint, not after model load.
 - **Results re-rank transparently.** Keyword results render immediately; when
@@ -113,6 +116,63 @@ zero-backend deployments (static sites, offline-first PWAs).
 **Poor fit:** single-visit public pages (taxing the 99% who won't return);
 small option sets (below ~10, users scan the full list faster than they can
 type); bandwidth-constrained contexts.
+
+## Model-free semantic ranking: the static semantic table
+
+The default embedder is not a neural network at runtime. `minishlab/potion-base-4M`
+is a lookup table — `embeddings F32 [29528, 128]`, 14.4 MB of rows, mean-pooled and
+L2-normalized. And because the option vectors are already precomputed, the entire
+dense channel can be flattened algebraically:
+
+```text
+cos(query, option_j) = < normalize(mean_i E_i), V_j >
+                     = ( Σ_i <E_i, V_j> ) / ‖ Σ_i E_i ‖
+                     └──── per-word, per-option: precomputable ────┘
+```
+
+The denominator is the same positive number for every option `j`, so it cannot
+change the ranking — and RRF fusion consumes ranks. What ships is therefore a
+`words × options` matrix of integers: **no ONNX runtime, no WASM, no tokenizer, no
+inference.** Query-time work is a word lookup and an integer accumulation.
+
+```bash
+npm run build:tables    # scripts/build-semantic-table.mjs — zero dependencies
+```
+
+Pruning: a word can only move a ranking through the **spread** of its score row
+(`max_j - min_j`). A word whose spread is 0 adds a constant to every option and
+provably cannot change an order, so the build keeps the highest-spread words and
+drops the rest — 25% of the vocabulary by default (`--keep`). Measured cost is
+coverage, not correctness: a query whose surviving words are absent from the table
+scores nothing in the dense channel and falls back to keywords.
+
+Measured on the two demo datasets, 46 queries (component defaults, `npm run eval:table`):
+
+| dense source                  | bytes                 | tier 1 top-1 | tier 1 top-3 | tier 2 top-1 | tier 2 top-3 |
+|-------------------------------|-----------------------|--------------|--------------|--------------|--------------|
+| none (BM25 only) | 0 | 23/28 | 28/28 | 7/18 | 9/18 |
+| static table only | 348 KB + 157 KB | 19/28 | 24/28 | 9/18 | 11/18 |
+| **table + BM25 (shipped default)** | ~505 KB | **24/28** | **28/28** | **11/18** | **13/18** |
+| 15 MB model + BM25 | ~16.3 MB | 24/28 | 27/28 | 10/18 | 14/18 |
+
+The static table matches the model it replaces on the in-vocabulary tier and beats it
+on the paraphrase tier, at roughly 1/45th the bytes — because spread-pruning also
+removes the generic words that were diluting the mean-pooled query vector. int8
+quantization is exact for ranking, and int4 measured exact too.
+
+**What this does not do.** It does not remove the need for semantic *knowledge*, only
+the need to *compute* it: word→option affinities the embedder knew are now data. A
+table derived from corpus statistics alone cannot know that "sandbags" implies a
+disaster-response agency, because nothing in the corpus pairs them — that knowledge
+has to arrive from a pretrained embedder (any size), from hand-authored paraphrases,
+or from a server. Two structural consequences:
+
+- The table is a projection onto **one option list**. Add, remove or reorder options
+  and rebuild (`npm run build:tables`); the eval refuses a stale artifact rather than
+  ranking against misaligned columns.
+- Query-time scores are not cosine. Ranking is unaffected (RRF uses ranks), but
+  `threshold` filters on magnitude, so the build calibrates a single scale factor and
+  reports its spread. Use `thresholdMode: 'relative'` (default) and it stops mattering.
 
 ## Build-time precomputed vectors
 
@@ -164,8 +224,10 @@ search toggle for A/B testing dense vs keyword-only ranking.
 | option            | default                                                    | meaning                                              |
 |-------------------|------------------------------------------------------------|------------------------------------------------------|
 | `data`            | `[]`                                                       | Array of `{ value, text, vectorText }`              |
+| `table`           | `null`                                                     | Static semantic table artifact — enables model-free dense ranking (no download) |
 | `model`           | `'minishlab/potion-base-4M'`                               | Embedding model (Model2Vec via ORT, or any Transformers.js feature-extraction id) |
-| `threshold`       | `0.3`                                                      | Minimum cosine similarity for an option to show     |
+| `threshold`       | `0.3`                                                      | Minimum dense score for an option to show            |
+| `thresholdMode`   | `'relative'`                                               | `'relative'`: fraction of the query's best dense score (scale-free). `'absolute'`: compare against the raw dense score (cosine only) |
 | `maxResults`      | `10`                                                       | Max options rendered in the dropdown                |
 | `debounceMs`      | `150`                                                      | Debounce for re-ranking after a keystroke           |
 | `phonetic`        | `true`                                                     | Index metaphone phonetic keys alongside exact tokens (typo tolerance) |
@@ -173,16 +235,22 @@ search toggle for A/B testing dense vs keyword-only ranking.
 | `fusion`          | `'rrf'`                                                    | `'rrf'` (rank-based, no tuning) or `'weighted'` (score-based) |
 | `rrfK`            | `60`                                                       | RRF rank constant                                   |
 | `lexicalWeight`   | `0.5`                                                      | BM25 weight (only when `fusion: 'weighted'`)        |
+| `genericDfFrac`   | `0.34`                                                     | A query token in more than this fraction of options is not informative and earns no sparse rank credit |
+| `sparseMinCoverage` | `0.67`                                                   | Fraction of the query's informative tokens an option must contain before the keyword channel influences the order (dense mode only) |
+| `sparseConfidence` | `null`                                                    | Weight the sparse channel by query evidence instead of a cliff: `'coverage'` or `'ramp'` |
 | `placeholder`     | `''`                                                       | Input placeholder                                   |
 | `onChange`        | `null`                                                     | `onChange(value, item)` callback                    |
 
 ## API
 
-`createVectorComboBox(boxEl, options)` → `{ el, select, input, setQuery, setDenseEnabled, setUsePrecomputed, refresh, destroy }`
+`createVectorComboBox(boxEl, options)` → `{ el, select, input, setQuery, setDenseSource, setDenseEnabled, setUsePrecomputed, refresh, destroy }`
 
 - `setQuery(query)` — programmatically fill the input and rank (as if typed)
+- `setDenseSource('table' | 'model' | false)` — choose the dense channel. `'table'`
+  needs the `table` artifact and downloads nothing; `'model'` is what starts the
+  ~16 MB embedder download; `false` is keyword-only
 - `setDenseEnabled(bool)` — toggle the dense channel on/off (BM25 stays live)
-- `setUsePrecomputed(bool)` — switch between build-time and on-load vectors
+- `setUsePrecomputed(bool)` — switch between build-time and on-load vectors (model mode)
 
 ## Keyboard
 
@@ -190,17 +258,44 @@ search toggle for A/B testing dense vs keyword-only ranking.
 
 ## Files
 
-- `vector-combobox.js` — the reusable ES module (imports `metaphone.js` +
-  Transformers.js at runtime; no bundler)
+- `vector-combobox.js` — the reusable ES module (USWDS combo-box controller; imports
+  `search-core.js` and, for model mode, Transformers.js at runtime; no bundler)
+- `search-core.js` — the pure retrieval logic: tokenizer, BM25 index, term-coverage
+  gating, and the eligibility + fusion ranking. Shared by the component and every
+  eval script, so a measurement is of the code that ships
+- `static-table.js` — decoder for the model-free static semantic table (no deps;
+  works in the browser and in Node)
 - `metaphone.js` — phonetic encoder (ported from govdoc-explainer)
 - `data.js` / `data-agencies.js` — demo datasets
-- `data.*.embeddings.json` — precomputed vectors (`npm run precompute`)
+- `data.*.embeddings.json` — precomputed option vectors (`npm run precompute`)
+- `data.*.semantic.json` — static semantic tables (`npm run build:tables`)
+- `scripts/build-semantic-table.mjs` — build the model-free table and verify it
 - `scripts/precompute.mjs` — build-time embedding index generation
 - `scripts/eval-embedders.mjs` — corpus-relative model evaluation
 - `scripts/eval-metaphone.mjs` — phonetic tokenizer evaluation
+- `scripts/eval-no-model.mjs` — the keyword-only baseline, both query tiers
+- `scripts/eval-static-table.mjs` — score the static table through the real fusion
+- `scripts/smoke.mjs` — headless DOM check of wiring (needs `npm i --no-save jsdom`)
 
 ## What's still open
 
+- **The evaluation had one tier, and it was the wrong one.** All 28 published test
+  queries are phrased in words that already appear in `vectorText`, so the keyword
+  channel sees what the embedder sees: BM25 alone scores 23/28 top-1 there and the
+  15 MB model 24-25/28. Paraphrase queries (tier 2 in `scripts/datasets.mjs`, 20-50%
+  corpus-word coverage) separate the two: BM25 7/18, the static table fused 11/18.
+  Every model/size/pruning decision made before this was made blind to that gap.
+- **Tier 2 is 18 hand-written queries.** Directions, not a gate. Growing it into
+  relevance-judged data is the prerequisite for the fusion-tuning item below.
+- **Hybrid still loses ground on paraphrases.** Dense-only table measures 9/18 top-1
+  on tier 2; fused it is 11/18 overall but the keyword channel is never *helping*
+  there. The df gate, the term-coverage cliff and evidence-proportional weighting
+  (`sparseConfidence`) were all measured; the cliff won, and none of them closes the
+  gap. This is fusion-design territory that wants judged data, not another sweep.
+- **Stop words are doing real work at this corpus size.** `genericDfFrac` cannot
+  identify "the" in 42 documents (it appears in only 8), and before the stop-word
+  list a query's keyword ranking could be decided by that one word. A corpus with
+  different function-word statistics may want a different list, or a real stemmer.
 - **Static-model frontier**: potion-2M degraded (20/28), potion-4M was the
   sweet spot. Where exactly does discrimination break, and does it break
   differently for different option-list domains? Answerable with per-domain
@@ -210,5 +305,6 @@ search toggle for A/B testing dense vs keyword-only ranking.
   data — hand-tuned fusion weights are where search systems decay silently.
 - **Scaling**: BM25 builds synchronously and the fused re-rank is O(n) per
   keystroke — instant at 42, fine at a few hundred, worth profiling at a
-  thousand. Beyond that, the sparse channel needs an inverted index and the
-  dense channel might need approximate nearest-neighbor search.
+  thousand. The table's row count is fixed by the vocabulary, but its column count
+  grows with options: 42 columns is 348 KB, 200 options would be ~1.6 MB at the same
+  pruning — at which point the word→prototype clustering idea gets interesting.

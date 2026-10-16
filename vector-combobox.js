@@ -26,9 +26,17 @@
 //     <select id="cb" name="cb" class="usa-select"></select>
 //   </div>
 
-import { metaphone } from './metaphone.js';
+import { BM25Index, tokenize, tokenizePhonetic, rankItems } from './search-core.js';
+import { decodeTable } from './static-table.js';
 
-const DEFAULTS = {
+// The sparse channel and the fusion logic live in search-core.js so the
+// evaluation scripts measure the ranking this module actually performs. Re-exported
+// here because they were previously imported from this module.
+export { BM25Index, tokenize, tokenizePhonetic };
+
+// Exported so the evaluation scripts measure the component's actual defaults
+// rather than a copy that can drift.
+export const DEFAULTS = {
   // Default dense embedder: minishlab/potion-base-4M — a Model2Vec
   // "StaticModel" (distilled from bge-base into a pure embedding table,
   // 128-dim, mean-pooled, L2-normalized in-graph). 15.1 MB fp32 ONNX.
@@ -71,6 +79,36 @@ const DEFAULTS = {
   fusion: 'rrf',
   rrfK: 60,
   lexicalWeight: 0.5,
+  // --- Dense source -------------------------------------------------------
+  // 'table' (when `table` is supplied): a build-time static semantic table
+  // (scripts/build-semantic-table.mjs) — a word -> per-option score matrix. Zero
+  // inference: no ONNX runtime, no WASM, no tokenizer, ~200 KB instead of the
+  // ~15 MB model, and results are correct on the first keystroke.
+  // 'model': Transformers.js + the `model` embedder. Needed for a contextual
+  // embedder, or when options change too often to regenerate a table.
+  table: null,                  // artifact from build-semantic-table.mjs
+  // --- Eligibility --------------------------------------------------------
+  // 'relative' (default): `threshold` is a fraction of the query's BEST dense
+  // score, so it is scale-free across embedders and table units. An absolute cosine
+  // cutoff silently evicts the dense channel's own top pick whenever a query only
+  // weakly matches everything — which is the paraphrase case the dense channel
+  // exists for (measured: 8/14 paraphrase agency queries have a best true cosine
+  // under the old 0.3 absolute cutoff).
+  thresholdMode: 'relative',    // 'relative' | 'absolute'
+  // --- Sparse-channel gating (measured by scripts/build-semantic-table.mjs) -----
+  // A query token appearing in more than this fraction of the options carries
+  // almost no information, so it cannot earn the sparse channel rank credit.
+  genericDfFrac: 0.34,
+  // How much of the query's informative vocabulary an option must contain before
+  // the keyword channel influences the order at all. Ungated, a generic word match
+  // ("before", "at", "behind") gives a distractor the same RRF credit as a full
+  // keyword match, and fusion measured WORSE than dense alone on paraphrase queries
+  // (table alone 13/18 -> fused 9/18 top-1; this gate recovers 10/18 and also
+  // improves the in-vocabulary tier). 0 disables the gate.
+  sparseMinCoverage: 0.67,
+  // Weight the sparse channel by how much of the query it explains instead of
+  // using a cliff: 'coverage' | 'ramp' | null (always-on hybrid).
+  sparseConfidence: null,
   placeholder: '',
   defaultValue: '',
   onChange: null,
@@ -210,86 +248,6 @@ function cosine(a, b) {
   return dot; // vectors are L2-normalized, so dot == cosine
 }
 
-// --- BM25 sparse retrieval channel (the classic keyword-matching ranker) ---
-// Sparse counterpart to the dense embedding: IDF-weighted exact-term matching
-// over each option's title (boosted) + vectorText. Catches dates, numbers,
-// and proper nouns the dense model can't see ("October" -> "(October 2023)").
-// ~40 lines, no dependencies.
-
-function stem(w) {
-  // Naive suffix stripper (NOT Porter) — enough for plural/verb variants on a
-  // small corpus: "records"->"record", "publishing"->"publish".
-  if (w.length > 5 && w.endsWith('ing')) return w.slice(0, -3);
-  if (w.length > 4 && w.endsWith('ed')) return w.slice(0, -2);
-  if (w.length > 4 && w.endsWith('es')) return w.slice(0, -2);
-  if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) return w.slice(0, -1);
-  return w;
-}
-
-export function tokenize(text) {
-  return (text || '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((w) => w.length > 1)
-    .map(stem);
-}
-
-// Union tokenizer: exact stemmed tokens PLUS metaphone phonetic keys. Exact
-// tokens keep their IDF precision; phonetic keys let typo'd query tokens
-// still collide with the intended term. (Evaluated in
-// scripts/eval-metaphone.mjs — typo top-3 14/14, clean no regression.)
-function tokenizePhonetic(text) {
-  const toks = tokenize(text);
-  return [...toks, ...toks.map(metaphone)];
-}
-
-// The tokenizer is injectable so evaluations (scripts/eval-metaphone.mjs) and
-// downstream users can subclass with e.g. phonetic keys while keeping the
-// IDF/BM25 machinery identical.
-export class BM25Index {
-  constructor(items, { k1 = 1.5, b = 0.75, titleBoost = 3, tokenize: tokenizeFn = tokenize } = {}) {
-    this.k1 = k1;
-    this.b = b;
-    this._tokenize = tokenizeFn;
-    this.tfs = [];
-    this.dls = [];
-    this.df = new Map();
-    items.forEach((item) => {
-      // Title tokens repeated `titleBoost` times so title hits dominate.
-      const tokens = [
-        ...this._tokenize(item.text), ...this._tokenize(item.text), ...this._tokenize(item.text),
-        ...this._tokenize(item.vectorText || item.text),
-      ];
-      const tf = new Map();
-      for (const t of tokens) tf.set(t, (tf.get(t) || 0) + 1);
-      for (const t of tf.keys()) this.df.set(t, (this.df.get(t) || 0) + 1);
-      this.tfs.push(tf);
-      this.dls.push(tokens.length);
-    });
-    this.N = items.length;
-    this.avgdl = this.dls.reduce((a, c) => a + c, 0) / (this.N || 1);
-  }
-
-  // Raw BM25 scores of `query` against every indexed item.
-  scores(query) {
-    const out = new Array(this.N).fill(0);
-    const qTokens = [...new Set(this._tokenize(query))];
-    if (!qTokens.length) return out;
-    for (const t of qTokens) {
-      const df = this.df.get(t) || 0;
-      if (!df) continue;
-      const idf = Math.log(1 + (this.N - df + 0.5) / (df + 0.5));
-      for (let i = 0; i < this.N; i++) {
-        const tf = this.tfs[i].get(t) || 0;
-        if (!tf) continue;
-        const denom = tf + this.k1 * (1 - this.b + (this.b * this.dls[i]) / this.avgdl);
-        out[i] += idf * ((tf * (this.k1 + 1)) / denom);
-      }
-    }
-    return out;
-  }
-}
-
 function debounce(fn, ms) {
   let t;
   return (...args) => {
@@ -317,7 +275,7 @@ export function createVectorComboBox(boxEl, opts = {}) {
   const hintId = `${selectId}--assistiveHint`;
 
   // --- Build hidden <select> options from data (for form submission) ---
-  selectEl.innerHTML = '';
+  selectEl.replaceChildren();
   const placeholderOpt = document.createElement('option');
   placeholderOpt.value = '';
   placeholderOpt.textContent = o.placeholder ? `Select…` : '';
@@ -373,6 +331,7 @@ export function createVectorComboBox(boxEl, opts = {}) {
   // --- State ---
   const bm25Index = new BM25Index(o.data, {
     tokenize: o.phonetic ? tokenizePhonetic : tokenize,
+    genericDfFrac: o.genericDfFrac,
   }); // sparse keyword channel (instant)
 
   // Two embedding sources, each computed exactly once:
@@ -386,6 +345,11 @@ export function createVectorComboBox(boxEl, opts = {}) {
   let ready = false;                 // model + active embeddings available
   let denseFailed = false;           // model download/inference failed
   let denseEnabled = o.hybrid;       // runtime switch: dense channel on/off
+  // A static semantic table answers queries synchronously, so the dense channel is
+  // ready before the first keystroke and nothing is ever downloaded.
+  const staticTable = o.table ? decodeTable(o.table) : null;
+  let denseSource = staticTable ? 'table' : 'model';
+  if (staticTable) ready = true;
   let highlightedIndex = -1;
   let renderedItems = [];            // current ranked results
 
@@ -428,17 +392,6 @@ export function createVectorComboBox(boxEl, opts = {}) {
 
   function setStatus(text) { statusEl.textContent = text; }
 
-  // Keyword-only ranking (no download required). Used before the dense model
-  // finishes loading and permanently if the model fails to load.
-  function bm25Ranked(lexRaw) {
-    return o.data
-      .map((_, i) => ({ i, lex: lexRaw[i] }))
-      .filter((x) => x.lex > 0)
-      .sort((a, b) => b.lex - a.lex)
-      .slice(0, o.maxResults)
-      .map((x) => x.i);
-  }
-
   function rank(query) {
     // Returns a promise of ranked item indices.
     return (async () => {
@@ -446,11 +399,20 @@ export function createVectorComboBox(boxEl, opts = {}) {
         return o.data.map((_, i) => i).slice(0, o.maxResults);
       }
       const lexRaw = bm25Index.scores(query);
+      // Informative-token scores rank the sparse channel; full scores still decide
+      // eligibility, so a generic-only match can appear without being boosted.
+      const lexInfo = bm25Index.scores(query, { informativeOnly: true });
+      const coverage = bm25Index.coverage(query);
+      const fuse = (denseRaw) => rankItems(o.data.length, lexRaw, denseRaw, o, lexInfo, coverage);
 
       // Dense channel disabled at runtime (e.g. the demo's "vector search"
       // toggle switched off): keyword-only ranking, no model required.
       if (!denseEnabled) {
-        return bm25Ranked(lexRaw);
+        return fuse(null);
+      }
+      // Static semantic table: synchronous, no download, no inference.
+      if (denseSource === 'table') {
+        return fuse(Array.from(staticTable.scores(query)));
       }
 
       // Degraded mode: dense model not ready (or failed). The sparse BM25
@@ -467,48 +429,13 @@ export function createVectorComboBox(boxEl, opts = {}) {
             .catch(() => {});
           if (!o.hybrid) return []; // vector-only config: nothing to show yet
         }
-        return bm25Ranked(lexRaw);
+        return fuse(null);
       }
 
       const q = await embed(query, o.model, o);
       const vecs = await activeVecs;
-      const scored = o.data.map((item, i) => ({
-        i,
-        s: cosine(q, vecs[i]),
-        lex: lexRaw[i],
-      }));
+      return fuse(o.data.map((item, i) => cosine(q, vecs[i])));
 
-      // Eligibility: dense hit above threshold OR any keyword match.
-      const eligible = scored.filter((x) => x.s >= o.threshold || x.lex > 0);
-
-      let ordered;
-      if (o.fusion === 'weighted') {
-        // Score-based fusion (needs per-query normalization of BM25).
-        let lexMax = 0;
-        for (const x of eligible) if (x.lex > lexMax) lexMax = x.lex;
-        ordered = eligible
-          .map((x) => ({ ...x, combined: x.s + o.lexicalWeight * (lexMax > 0 ? x.lex / lexMax : 0) }))
-          .sort((a, b) => b.combined - a.combined);
-      } else {
-        // Reciprocal Rank Fusion: rank-based, no normalization or tuning.
-        // Dense ranks over ALL items (cosine is always defined); sparse ranks
-        // only over items with BM25 > 0 (others contribute no term).
-        const denseRank = new Map(
-          [...scored].sort((a, b) => b.s - a.s).map((x, pos) => [x.i, pos + 1])
-        );
-        const sparseRanked = scored.filter((x) => x.lex > 0).sort((a, b) => b.lex - a.lex);
-        const sparseRank = new Map(sparseRanked.map((x, pos) => [x.i, pos + 1]));
-        ordered = eligible
-          .map((x) => {
-            let rrf = 0;
-            if (denseRank.has(x.i)) rrf += 1 / (o.rrfK + denseRank.get(x.i));
-            if (sparseRank.has(x.i)) rrf += 1 / (o.rrfK + sparseRank.get(x.i));
-            return { ...x, combined: rrf };
-          })
-          .sort((a, b) => b.combined - a.combined);
-      }
-
-      return ordered.slice(0, o.maxResults).map((x) => x.i);
     })();
   }
 
@@ -551,7 +478,7 @@ export function createVectorComboBox(boxEl, opts = {}) {
   }
 
   function renderList(indices) {
-    listEl.innerHTML = '';
+    listEl.replaceChildren();
     renderedItems = indices;
     if (!indices.length) {
       const li = document.createElement('li');
@@ -754,6 +681,35 @@ export function createVectorComboBox(boxEl, opts = {}) {
   // (useful for testing, comparisons, or slow connections). Turning it back on
   // resumes the warmup/load path and re-ranks the visible query. The sparse
   // BM25 channel is always available.
+  // Switch the dense channel between the static semantic table, the in-browser
+  // embedder, and off. Table mode needs no download and is ready immediately;
+  // model mode resumes the warmup path. The sparse BM25 channel is always live.
+  function setDenseSource(source) {
+    const want = source === false || source === 'off' ? null : source;
+    if (want === null) {
+      denseEnabled = false;
+    } else {
+      if (want === 'model' && !o.model) throw new Error('vector-combobox: model mode needs o.model');
+      if (want === 'table' && !staticTable) throw new Error('vector-combobox: no `table` artifact was supplied');
+      denseEnabled = true;
+      denseSource = want;
+      if (want === 'table') { ready = true; }
+      else if (!ready && !denseFailed) {
+        ensureReady().catch((err) => {
+          console.error('vector-combobox: failed to load embedding model', err);
+          denseFailed = true;
+        });
+      }
+    }
+    rerank();
+  }
+
+  function rerank() {
+    if (!isOpen()) return;
+    if (inputEl.value.trim()) rank(inputEl.value).then(renderList);
+    else renderList(o.data.map((_, i) => i).slice(0, o.maxResults));
+  }
+
   function setDenseEnabled(enabled) {
     denseEnabled = !!enabled;
     if (denseEnabled && !ready && !denseFailed) {
@@ -792,7 +748,9 @@ export function createVectorComboBox(boxEl, opts = {}) {
   // of breaking. The runtime pass always runs — it is the on-load source the
   // precomputed toggle switches to — even when every item has a precomputed
   // vector, and the pipeline warmup is needed for the query regardless.
-  if (denseEnabled) {
+  // With a static semantic table the dense channel is already ready and nothing
+  // must be downloaded, so warmup is skipped entirely.
+  if (denseEnabled && denseSource === 'model') {
     embedAll();
     ensureReady()
       .then(() => embed('warmup', o.model, o))
@@ -812,6 +770,7 @@ export function createVectorComboBox(boxEl, opts = {}) {
     input: inputEl,
     setQuery,
     setDenseEnabled,
+    setDenseSource,
     setUsePrecomputed,
     refresh: () => {
       activeVecs = null;
@@ -820,6 +779,6 @@ export function createVectorComboBox(boxEl, opts = {}) {
       denseFailed = false;
       return ensureReady();
     },
-    destroy: () => { boxEl.innerHTML = ''; boxEl.classList.remove(PRISTINE); },
+    destroy: () => { boxEl.replaceChildren(); boxEl.classList.remove(PRISTINE); },
   };
 }

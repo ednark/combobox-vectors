@@ -32,26 +32,26 @@ const DATASETS = process.argv.length > 2
   ? process.argv.slice(2)
   : ['data.js', 'data-agencies.js'];
 
-function loadDataset(file) {
+// The datasets are plain ES modules of data, so import them directly. The previous
+// version regex-matched the export and evaluated it with `new Function`, which is
+// unnecessary, flagged by the security lint rule, and a drift risk: an import reads
+// exactly what the browser ships.
+async function loadDataset(file) {
   const path = join(ROOT, file);
   if (!existsSync(path)) {
     console.error(`skip ${file}: not found`);
     return null;
   }
-  const src = readFileSync(path, 'utf8');
-  // Static ES-module data files; evaluate the export without a bundler.
-  // `export const NAME = ...` -> `module.exports = ...` (handles leading
-  // comment lines and the optional trailing semicolon).
-  const m = src.match(/export\s+const\s+[A-Za-z_]+\s*=\s*([\s\S]*?);?\s*$/);
-  if (!m) {
-    console.error(`skip ${file}: no \`export const\` array found`);
+  let mod;
+  try {
+    mod = await import(path);
+  } catch (err) {
+    console.error(`skip ${file}: cannot import (${err.message})`);
     return null;
   }
-  const mod = { exports: null };
-  new Function('module', `module.exports = ${m[1]};`)(mod);
-  const data = mod.exports;
-  if (!Array.isArray(data)) {
-    console.error(`skip ${file}: export is not an array`);
+  const data = Object.values(mod).find((v) => Array.isArray(v));
+  if (!data) {
+    console.error(`skip ${file}: no exported array found`);
     return null;
   }
   return { path, data };
@@ -66,7 +66,7 @@ async function main() {
   console.log(`loading ${MODEL} …`);
 
   for (const file of DATASETS) {
-    const loaded = loadDataset(file);
+    const loaded = await loadDataset(file);
     if (!loaded) continue;
     const { path, data } = loaded;
 

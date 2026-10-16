@@ -8,7 +8,10 @@
     "precompute": "node scripts/precompute.mjs",
     "verify-queries": "node scripts/verify-queries.mjs",
     "eval:embedders": "node scripts/eval-embedders.mjs",
-    "eval:metaphone": "node scripts/eval-metaphone.mjs"
+    "eval:metaphone": "node scripts/eval-metaphone.mjs",
+    "build:tables": "node scripts/build-semantic-table.mjs",
+    "eval:no-model": "node scripts/eval-no-model.mjs",
+    "eval:table": "node scripts/eval-static-table.mjs"
   },
   "devDependencies": {
     "@huggingface/transformers": "^3.0.0"

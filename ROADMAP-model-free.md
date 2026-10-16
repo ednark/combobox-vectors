@@ -60,8 +60,41 @@ WASM, no tokenizer, no inference.
   BM25 index and fusion the browser runs. Before this, the eval reimplemented fusion
   and drifted (its tie handling hid the paraphrase regression for a day).
 
+## Phonetic modes: the follow-up, and a lesson about the harness
+
+The commit that shipped the table reported a "phonetic-vs-exact regression"
+(exact-only 37/46 vs union 33/46 top-1 across both tiers). **That number was wrong.**
+Two bugs in `scripts/eval-no-model.mjs` manufactured it:
+
+1. A query with no keyword match scores 0 everywhere, and competition ranking of an
+   all-zero field returns rank 1 — so the exact-only channel was credited with
+   answering 7 paraphrase queries it never answered.
+2. `null <= 3` is true in JavaScript, so encoding "no evidence" as `null` made those
+   same queries count as top-3 hits, and `1 / Math.min(rank, n)` on a 0 rank produced
+   `MRR Infinity` in the output — a value that should have stopped the run.
+
+Fixed by treating "no evidence" as its own bucket, excluded from top-1/top-3/MRR, and
+labeled as such in the output. Honest tier-1 numbers: 23/28 top-1, 28/28 top-3 for
+**all three phonetic modes** — the keyword channel has real signal there and the modes
+do not differ. Honest tier-2 numbers: keyword-only is near-useless in every mode
+(5-7/18 top-1 with 7-11 queries unanswered), which is the whole argument for the dense
+channel.
+
+So `'fallback'` shipped as the default for a different reason than a measured ranking
+win — and the README says so rather than implying one. Union double-counts correctly
+spelled words (`zero trust` 14.0 vs 7.2) and leaks phantom matches onto citation
+queries (`FIPS 199` scoring 0.1 on three unrelated documents), on a corpus where 57%
+of stems share a metaphone key. Fallback keeps identical typo tolerance
+(10/14 top-1, 14/14 top-3) and identical fused ranking without that ambiguity.
+`phoneticWeight: 0.5` measured the same again, so the weight is available but not
+needed here.
+
 ## What is still open
 
+0. **Re-benchmark `phonetic` per deployment.** All three modes tie on this corpus;
+   they will not on one with heavier abbreviation or non-English morphology. A
+   keyword-only deployment (`hybrid: false`) should compare `'off'` and `'fallback'`
+   on its own query log, since `df == 0` is the shape of a typo *and* of a paraphrase.
 1. **Grow tier 2 into judged data.** 18 hand-written paraphrase queries are directional.
    Until then, treat fusion numbers as a signal, not a gate — the README's own warning
    about hand-tuned fusion weights applies to anything chosen on this set.

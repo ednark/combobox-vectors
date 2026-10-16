@@ -66,13 +66,25 @@ export function tokenizePhonetic(text) {
 // Sparse counterpart to the dense embedding: IDF-weighted exact-term matching
 // over each option's title (boosted) + vectorText. Catches dates, numbers,
 // and proper nouns the dense channel can't see ("October" -> "(October 2023)").
-// ~40 lines, no dependencies.
-
-// The tokenizer is injectable so evaluations (scripts/eval-metaphone.mjs) and
-// downstream users can subclass with e.g. phonetic keys while keeping the
-// IDF/BM25 machinery identical.
+//
+// Phonetic matching has three modes, and they are NOT equivalent:
+//   'off'      — exact stemmed tokens only.
+//   'union'    — documents AND queries carry exact tokens plus metaphone keys.
+//                Typo-tolerant, but a correctly spelled token also fires its key,
+//                and 4-character keys are heavily reused, so exact matches get
+//                diluted by collisions with unrelated words. Measured on the
+//                46-query eval set: union 33/46 top-1 vs exact-only 37/46.
+//   'fallback' — exact tokens are the ranking. A query token is looked up
+//                phonetically ONLY when its exact form is absent from the index
+//                (df == 0), which is precisely the shape of a typo. Correctly
+//                spelled words can no longer collide, and the key channel gets its
+//                own df/IDF/length statistics instead of borrowing the exact ones.
 export class BM25Index {
-  constructor(items, { k1 = 1.5, b = 0.75, titleBoost = 3, genericDfFrac = 0.34, tokenize: tokenizeFn = tokenize } = {}) {
+  constructor(items, {
+    k1 = 1.5, b = 0.75, titleBoost = 3, genericDfFrac = 0.34,
+    phoneticMode = 'off', phoneticWeight = 1,
+    tokenize: tokenizeFn = tokenize,
+  } = {}) {
     this.k1 = k1;
     this.b = b;
     this.titleBoost = titleBoost;
@@ -80,24 +92,51 @@ export class BM25Index {
     // no discriminative information ("before", "at", "behind", "record"). Used by
     // scores(query, { informativeOnly: true }) to gate the sparse channel.
     this.genericDfFrac = genericDfFrac;
-    this._tokenize = tokenizeFn;
-    this.tfs = [];
-    this.dls = [];
-    this.df = new Map();
+    this.phoneticMode = phoneticMode;
+    this.phoneticWeight = phoneticWeight;
+    this._base = tokenizeFn;
+    // Union is expressed as a tokenizer, so an injected tokenizer (as in
+    // scripts/eval-metaphone.mjs) keeps its exact shape and stays comparable.
+    this._tokenize = phoneticMode === 'union' ? tokenizePhonetic : tokenizeFn;
+
+    this.exact = this._buildChannel(items, (text) => this._tokenize(text));
+    this.phonetic = phoneticMode === 'fallback'
+      ? this._buildChannel(items, (text) => this._base(text).map(metaphone))
+      : null;
+    this.N = this.exact.N;
+  }
+
+  _buildChannel(items, tokenOf) {
+    const tfs = [];
+    const dls = [];
+    const df = new Map();
     for (const item of items) {
       // Title tokens repeated `titleBoost` times so title hits dominate.
-      const title = this._tokenize(item.text);
+      const title = tokenOf(item.text);
       const tokens = [];
       for (let r = 0; r < this.titleBoost; r++) tokens.push(...title);
-      tokens.push(...this._tokenize(item.vectorText || item.text));
+      tokens.push(...tokenOf(item.vectorText || item.text));
       const tf = new Map();
       for (const t of tokens) tf.set(t, (tf.get(t) || 0) + 1);
-      for (const t of tf.keys()) this.df.set(t, (this.df.get(t) || 0) + 1);
-      this.tfs.push(tf);
-      this.dls.push(tokens.length);
+      for (const t of tf.keys()) df.set(t, (df.get(t) || 0) + 1);
+      tfs.push(tf);
+      dls.push(tokens.length);
     }
-    this.N = items.length;
-    this.avgdl = this.dls.reduce((a, c) => (a + c), 0) / (this.N || 1);
+    const N = items.length || 1;
+    return { tfs, dls, df, N, avgdl: dls.reduce((a, c) => a + c, 0) / N };
+  }
+
+  // Add one BM25 term's contribution to every document, in place.
+  _addTerm(out, ch, term, weight) {
+    const df = ch.df.get(term) || 0;
+    if (!df) return;
+    const idf = Math.log(1 + (ch.N - df + 0.5) / (df + 0.5));
+    for (let i = 0; i < ch.N; i++) {
+      const tf = ch.tfs[i].get(term) || 0;
+      if (!tf) continue;
+      const denom = tf + this.k1 * (1 - this.b + (this.b * ch.dls[i]) / ch.avgdl);
+      out[i] += weight * idf * ((tf * (this.k1 + 1)) / denom);
+    }
   }
 
   /**
@@ -109,25 +148,51 @@ export class BM25Index {
    */
   scores(query, { informativeOnly = false } = {}) {
     const out = new Array(this.N).fill(0);
-    const qTokens = [...new Set(this._tokenize(query))];
-    if (!qTokens.length) return out;
-    const dfCeiling = this.genericDfFrac * this.N;
-    for (const t of qTokens) {
-      const df = this.df.get(t) || 0;
-      if (!df) continue;
-      if (informativeOnly && df > dfCeiling) continue;
-      const idf = Math.log(1 + (this.N - df + 0.5) / (df + 0.5));
-      for (let i = 0; i < this.N; i++) {
-        const tf = this.tfs[i].get(t) || 0;
-        if (!tf) continue;
-        const denom = tf + this.k1 * (1 - this.b + (this.b * this.dls[i]) / this.avgdl);
-        out[i] += idf * ((tf * (this.k1 + 1)) / denom);
-      }
+    for (const hit of this.matchedTokens(query, { informativeOnly })) {
+      this._addTerm(out, hit.channel, hit.term, hit.weight);
     }
     return out;
   }
+
   /**
-   * Per-item fraction of the query's INFORMATIVE tokens that appear in the item.
+   * The query tokens able to contribute, each paired with the channel and weight it
+   * scores through — plus its document frequency. Shared by scores() and coverage()
+   * so the two can never disagree about what the keyword channel is asserting.
+   * @param {{ informativeOnly?: boolean }} [opts]
+   */
+  matchedTokens(query, { informativeOnly = false } = {}) {
+    const ceiling = this.genericDfFrac * this.exact.N;
+    const keep = (df) => df > 0 && (!informativeOnly || df <= ceiling);
+    const found = [];
+
+    if (this.phoneticMode === 'fallback') {
+      for (const t of [...new Set(this._base(query))]) {
+        const df = this.exact.df.get(t) || 0;
+        if (keep(df)) {
+          found.push({ term: t, channel: this.exact, weight: 1, df });
+          continue;
+        }
+        if (df > 0) continue; // exact match exists but is too generic: no fallback
+        // Exact form unseen in this corpus: could be a typo, a different inflection,
+        // or a word the option list never used. Try its phonetic key.
+        const key = metaphone(t);
+        const kdf = this.phonetic.df.get(key) || 0;
+        if (keep(kdf)) {
+          found.push({ term: key, channel: this.phonetic, weight: this.phoneticWeight, df: kdf, key: true });
+        }
+      }
+      return found;
+    }
+
+    for (const t of [...new Set(this._tokenize(query))]) {
+      const df = this.exact.df.get(t) || 0;
+      if (keep(df)) found.push({ term: t, channel: this.exact, weight: 1, df });
+    }
+    return found;
+  }
+
+  /**
+   * Per-item fraction of the query's informative tokens that appear in the item.
    * Scale-free lexical evidence: a query whose meaningful words are all present in
    * one option is a keyword query; a query where only one of three words appears is
    * not, however good that single match's BM25 score looks in isolation.
@@ -136,25 +201,34 @@ export class BM25Index {
    *          which is the normal shape of a paraphrase
    */
   coverage(query) {
-    const informative = this.informativeTokens(query);
-    if (!informative.length) return null;
+    const hits = this.matchedTokens(query, { informativeOnly: true });
+    if (!hits.length) return null;
     const out = Array(this.N);
     for (let i = 0; i < this.N; i++) {
       let hit = 0;
-      for (const t of informative) if (this.tfs[i].get(t)) hit += 1;
-      out[i] = hit / informative.length;
+      for (const h of hits) if (h.channel.tfs[i].get(h.term)) hit += 1;
+      out[i] = hit / hits.length;
     }
     return out;
   }
+}
 
-  // Query tokens that exist in the index and are rare enough to carry information.
-  informativeTokens(query) {
-    const dfCeiling = this.genericDfFrac * this.N;
-    return [...new Set(this._tokenize(query))].filter((t) => {
-      const df = this.df.get(t) || 0;
-      return df > 0 && df <= dfCeiling;
-    });
-  }
+// One place constructs the sparse index, so the component and every evaluation
+// script build the identical channel. Before this, scripts passed
+// `{ tokenize: tokenizePhonetic }` by hand — union — which silently measured a
+// different sparse channel than the one that would have shipped.
+export function phoneticModeOf(phonetic) {
+  if (phonetic === true) return 'union'; // historical shape, explicit opt-in
+  if (!phonetic || phonetic === 'off') return 'off';
+  return phonetic; // 'union' | 'fallback'
+}
+
+export function createSparseIndex(items, o = {}) {
+  return new BM25Index(items, {
+    genericDfFrac: o.genericDfFrac ?? 0.34,
+    phoneticMode: phoneticModeOf(o.phonetic ?? 'fallback'),
+    phoneticWeight: o.phoneticWeight ?? 1,
+  });
 }
 
 // Keyword-only ranking (no download required). Used before the dense channel is

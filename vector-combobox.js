@@ -26,13 +26,13 @@
 //     <select id="cb" name="cb" class="usa-select"></select>
 //   </div>
 
-import { BM25Index, tokenize, tokenizePhonetic, rankItems } from './search-core.js';
+import { BM25Index, createSparseIndex, rankItems, tokenize, tokenizePhonetic } from './search-core.js';
 import { decodeTable } from './static-table.js';
 
 // The sparse channel and the fusion logic live in search-core.js so the
 // evaluation scripts measure the ranking this module actually performs. Re-exported
 // here because they were previously imported from this module.
-export { BM25Index, tokenize, tokenizePhonetic };
+export { BM25Index, createSparseIndex, tokenize, tokenizePhonetic };
 
 // Exported so the evaluation scripts measure the component's actual defaults
 // rather than a copy that can drift.
@@ -63,7 +63,13 @@ export const DEFAULTS = {
   // still collide with the intended token ("recods" -> RKRT -> "records").
   // Corpus-relative eval (scripts/eval-metaphone.mjs): typo queries top-1
   // 6/14 -> 10/14, top-3 12/14 -> 14/14, clean queries no regression.
-  phonetic: true,
+  // Phonetic matching mode for the sparse channel. 'fallback' (default): exact
+  // tokens rank, and a query token is only looked up by metaphone key when its
+  // exact spelling is absent from the index — the shape of a typo. 'union' (the
+  // historical `true`) indexes keys alongside exact tokens in both documents and
+  // queries, which double-counts correctly spelled words and dilutes ranking with
+  // 4-character key collisions. false/'off' is exact-only.
+  phonetic: 'fallback',
   // Hybrid search fuses a BM25 sparse keyword index (title boosted + vectorText)
   // with dense vector similarity, so queries like "October" (in a title but
   // semantically absent from the vectorText) still surface the right option.
@@ -329,10 +335,7 @@ export function createVectorComboBox(boxEl, opts = {}) {
   const clearEl = boxEl.querySelector(`.${CL.clear}`);
 
   // --- State ---
-  const bm25Index = new BM25Index(o.data, {
-    tokenize: o.phonetic ? tokenizePhonetic : tokenize,
-    genericDfFrac: o.genericDfFrac,
-  }); // sparse keyword channel (instant)
+  const bm25Index = createSparseIndex(o.data, o); // sparse keyword channel (instant)
 
   // Two embedding sources, each computed exactly once:
   //   - precomputed: build-time vectors from item.embedding (scripts/precompute.mjs)

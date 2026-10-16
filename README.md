@@ -49,10 +49,11 @@ The solution is boring and well-established: run both channels.
   data" → `OMB M-22-09`.
 - **Sparse** — BM25 with IDF weighting over the title (boosted ×3) and
   `vectorText`. Captures exact tokens the dense channel is blind to: "October"
-  → `EO 14110`. Each token is also indexed as a **metaphone phonetic key**
-  (`phonetic: true`, default), so typo'd queries ("recods", "secuirty") still
-  collide with the intended term — measured at typo top-1 6/14 → 10/14, top-3
-  12/14 → 14/14, clean queries no regression.
+  → `EO 14110`. A token can also be looked up by its **metaphone phonetic key**, so
+  typo'd queries ("recods", "secuirty") still collide with the intended term —
+  measured at typo top-1 6/14 → 10/14, top-3 12/14 → 14/14, clean queries no
+  regression. How the keys are consulted is configurable, and the modes are not
+  equivalent (see `phonetic` below and "Phonetic modes").
 
 The two ranked lists are fused with **Reciprocal Rank Fusion** (`1/(60 + rank)`
 per channel — the same default Elasticsearch 8, OpenSearch, and Azure AI
@@ -174,6 +175,41 @@ or from a server. Two structural consequences:
   `threshold` filters on magnitude, so the build calibrates a single scale factor and
   reports its spread. Use `thresholdMode: 'relative'` (default) and it stops mattering.
 
+## Phonetic modes
+
+Metaphone keys are four characters long, so many different words share one. In the
+demo corpora that is not a corner case: **57% of the distinct stems in `data.js`
+live in a key bucket shared with another stem** (45% in `data-agencies.js`), and the
+worst buckets are exactly what this component is for — `22, 09, 2022, 199, 800, 53,
+2002` collapse together, and `international, interview, undercover, interagency,
+internal, interstate, interception` share a key.
+
+Three modes, measured on the same corpora:
+
+| mode | what it does | typo top-1 / top-3 | clean top-1 | fused tier 1 | fused tier 2 |
+|---|---|---|---|---|---|
+| `'off'` | exact stemmed tokens only | 6/14 · 12/14 | 8/10 | 24/28 · 28/28 | 10/18 · 12/18 |
+| `'union'` (historical `true`) | keys indexed beside exact tokens, in documents **and** queries | 10/14 · 14/14 | 8/10 | 24/28 · 28/28 | 11/18 · 13/18 |
+| **`'fallback'`** (default) | exact tokens rank; a key is consulted **only** when the exact spelling is absent from the index (`df == 0`) | 10/14 · 14/14 | 8/10 | 24/28 · 28/28 | 11/18 · 12/18 |
+
+Read honestly: on this corpus **the ranking is the same for all three**, so switching
+the default is not a quality win and is not claimed as one. It is a correctness and
+robustness change. Union double-counts every correctly spelled word — its own key
+fires too — which shows up directly in scores even when the order survives:
+`zero trust` scores 14.0 under union vs 7.2 under fallback/exact, and `FIPS 199`
+leaks a 0.1 onto Section 508, OMB M-19-21 and SP 800-63-4 under union while
+fallback/exact match one document. That is phantom evidence for a citation query, and
+a corpus with more abbreviations or a different language has more of it. Fallback keeps
+typo tolerance (its premise is `df == 0`, which is what a typo looks like) without
+making correctly spelled words ambiguous, and it keeps the term-coverage gate honest:
+a key hit only counts as lexical evidence when the word genuinely isn't in the corpus.
+
+One caveat worth knowing: `df == 0` is also the shape of a *paraphrase* word —
+"tinnitus", "sandbag", "gelatin". So in fallback mode those get a phonetic lookup that
+is usually wrong, not absent. Under fusion the term-coverage gate suppresses most of
+that, which is why the fused numbers hold; a keyword-only deployment (`hybrid: false`)
+should benchmark `'off'` against `'fallback'` on its own query log.
+
 ## Build-time precomputed vectors
 
 For larger datasets, option embeddings can be precomputed at build time and
@@ -230,7 +266,8 @@ search toggle for A/B testing dense vs keyword-only ranking.
 | `thresholdMode`   | `'relative'`                                               | `'relative'`: fraction of the query's best dense score (scale-free). `'absolute'`: compare against the raw dense score (cosine only) |
 | `maxResults`      | `10`                                                       | Max options rendered in the dropdown                |
 | `debounceMs`      | `150`                                                      | Debounce for re-ranking after a keystroke           |
-| `phonetic`        | `true`                                                     | Index metaphone phonetic keys alongside exact tokens (typo tolerance) |
+| `phonetic`        | `'fallback'`                                               | Phonetic matching mode: `'fallback'` (keys only for query tokens the corpus has never seen — the shape of a typo), `'union'` (historical `true`: keys indexed alongside exact tokens in documents and queries), `false`/`'off'` (exact only) |
+| `phoneticWeight`  | `1`                                                        | Weight of a phonetic-key match relative to an exact term, in `'fallback'` mode |
 | `hybrid`          | `true`                                                     | Fuse BM25 keyword matching with vector similarity   |
 | `fusion`          | `'rrf'`                                                    | `'rrf'` (rank-based, no tuning) or `'weighted'` (score-based) |
 | `rrfK`            | `60`                                                       | RRF rank constant                                   |

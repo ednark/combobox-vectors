@@ -31,7 +31,7 @@ import { gzipSync, brotliCompressSync } from 'node:zlib';
 
 import { DATASETS, TESTS, PARAPHRASE_TESTS, TIERS } from './datasets.mjs';
 import { decodeTable, tableWords } from '../static-table.js';
-import { BM25Index, tokenizePhonetic, rankItems } from '../search-core.js';
+import { createSparseIndex, rankItems } from '../search-core.js';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CACHE = join(ROOT, '.cache');
@@ -56,7 +56,7 @@ function isValueOfFlag(a) {
 // Must match the component's defaults so measured numbers are what ships.
 const RANK_OPTS = {
   threshold: 0.3, maxResults: 10, hybrid: true, fusion: 'rrf', rrfK: 60, lexicalWeight: 0.5,
-  thresholdMode: 'relative',
+  thresholdMode: 'relative', phonetic: 'fallback',
 };
 // The historical absolute cutoff, measured alongside for comparison.
 const RANK_OPTS_ABS = { ...RANK_OPTS, thresholdMode: 'absolute' };
@@ -371,7 +371,7 @@ function topAgreement(a, b) {
  */
 function verify({ artifact, reference, values, items, key }) {
   const table = decodeTable(artifact);
-  const bm25 = new BM25Index(items, { tokenize: tokenizePhonetic });
+  const bm25 = createSparseIndex(items, RANK_OPTS);
   const denseScores = (q) => Array.from(table.scores(q));
   const fusedRanks = (q) => rankItems(values.length, bm25.scores(q), denseScores(q), RANK_OPTS);
   const fusedRanksAbs = (q) => rankItems(values.length, bm25.scores(q), denseScores(q), RANK_OPTS_ABS);
@@ -380,7 +380,7 @@ function verify({ artifact, reference, values, items, key }) {
   // boosted above a clear semantic hit. One index per gate fraction, because the
   // df ceiling is an index-construction parameter.
   const gateIdx = new Map(GATE_FRACS.map((frac) => [
-    frac, new BM25Index(items, { tokenize: tokenizePhonetic, genericDfFrac: frac }),
+    frac, createSparseIndex(items, { ...RANK_OPTS, genericDfFrac: frac }),
   ]));
   // Term-coverage sweep is computed per tier (see verify loop below).
   const gated = (frac, q, dense, fusionOpts = RANK_OPTS, minCoverage = 0) => {

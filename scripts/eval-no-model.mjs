@@ -20,11 +20,12 @@
 // Usage: npm run eval:no-model
 
 import { DATASETS, TIERS } from './datasets.mjs';
-import { BM25Index, tokenize, tokenizePhonetic } from '../search-core.js';
+import { createSparseIndex } from '../search-core.js';
 
 const CHANNELS = {
-  bm25: { name: 'bm25 (exact tokens only)', tokenizeFn: tokenize },
-  phone: { name: 'bm25 + metaphone (shipped default)', tokenizeFn: tokenizePhonetic },
+  exact: { name: 'bm25, phonetic off (exact tokens only)', opts: { phonetic: 'off' } },
+  union: { name: 'bm25 + metaphone union (historical default)', opts: { phonetic: 'union' } },
+  fallback: { name: 'bm25 + metaphone fallback (typo-only keys)', opts: { phonetic: 'fallback' } },
 };
 
 // Competition ranking: rank = 1 + the number of options that strictly outscore
@@ -44,12 +45,19 @@ function rankQuery(index, items, targets, query) {
     }
   });
   if (best === -Infinity) return { rank: items.length + 1, matched: top > 0, top: '(no target)' };
+  // No evidence is not rank 1. If the best target score is 0 and nothing scored,
+  // the channel simply did not match: a real dropdown would render no keyword
+  // results at all (bm25Ranked keeps only lex > 0). Counting an all-zero tie as a
+  // win credited the phonetic-off channel for 7 paraphrase queries it never
+  // answered, and made a fake comparison look like a regression.
+  if (best === 0) return { rank: null, matched: false, top: top > 0 ? bestValue.slice(0, 38) : '(no token match)' };
   let better = 0;
   for (const s of scores) if (s > best) better += 1;
   return { rank: better + 1, matched: top > 0, top: bestValue.slice(0, 38) };
 }
 
 function rankFlag(rank) {
+  if (typeof rank !== 'number' || rank <= 0) return '-  ';
   if (rank === 1) return 'ok ';
   if (rank <= 3) return '~  ';
   return 'X  ';
@@ -64,7 +72,7 @@ for (const key of selected) {
   console.log(`\n=== ${ch.name} ===`);
   const indexes = {};
   for (const [dsName, items] of Object.entries(DATASETS)) {
-    indexes[dsName] = new BM25Index(items, { tokenize: ch.tokenizeFn });
+    indexes[dsName] = createSparseIndex(items, ch.opts);
   }
   const totals = { top1: 0, top3: 0, n: 0 };
 
@@ -73,26 +81,43 @@ for (const key of selected) {
     for (const t of tier.tests) {
       const r = rankQuery(indexes[t.ds], DATASETS[t.ds], t.targets, t.q);
       rows.push({ ...t, ...r });
+      const shown = typeof r.rank === 'number' ? String(r.rank).padStart(2) : ' -';
       console.log(
-        `  ${rankFlag(r.rank)} rank ${String(r.rank).padStart(2)}  ` +
-        `${r.matched ? '' : '[no token match] '}` +
+        `  ${rankFlag(r.rank)} rank${shown}  ` +
+        `${r.matched ? '' : '[no keyword evidence] '}` +
         `[${t.ds.padEnd(8)}] "${t.q}"  ->  ${r.top}`
       );
     }
     const n = rows.length;
     const count = (f) => rows.filter(f).length;
-    const mrr = rows.reduce((a, r) => a + 1 / Math.min(r.rank, n), 0) / n;
-    worstMiss = Math.max(worstMiss, rows.filter((r) => r.rank > 3).length);
+    // A query the channel cannot answer at all (rank null) is NOT a top-3 hit:
+    // JS evaluates `null <= 3` as true, which is how an earlier version of this
+    // harness made the phonetic-off channel look like it answered 18/18.
+    const hasEvidence = (r) => typeof r.rank === 'number' && r.rank > 0;
+    const ranked = rows.filter(hasEvidence);
+    const mrr = ranked.length ? ranked.reduce((a, r) => a + 1 / Math.min(r.rank, n), 0) / ranked.length : 0;
+    // Tier 1 is a regression guard: the keyword channel is supposed to be strong
+    // there. Tier 2 is informational — a keyword-only channel SHOULD be weak on
+    // paraphrases, that is the argument for the dense channel, so failing on it
+    // would make this diagnostic look broken every time it tells the truth.
+    if (tier !== TIERS[TIERS.length - 1]) {
+      worstMiss = Math.max(worstMiss, ranked.filter((r) => r.rank > 3).length);
+    }
     totals.top1 += count((r) => r.rank === 1);
-    totals.top3 += count((r) => r.rank <= 3);
+    totals.top3 += count((r) => hasEvidence(r) && r.rank <= 3);
     totals.n += n;
     console.log(`  [${tier.name}]`);
-    console.log(`      top1 ${count((r) => r.rank === 1)}/${n}  top3 ${count((r) => r.rank <= 3)}/${n}  ` +
-      `MRR ${mrr.toFixed(3)}  no-token-match ${count((r) => !r.matched)}`);
+    console.log(
+      `      top1 ${count((r) => r.rank === 1)}/${n}  ` +
+      `top3 ${count((r) => hasEvidence(r) && r.rank <= 3)}/${n}  ` +
+      `MRR ${mrr.toFixed(3)} (over ${ranked.length} answered)  ` +
+      `no keyword evidence ${count((r) => !hasEvidence(r))}`
+    );
   }
   console.log(`  [all tiers] top1 ${totals.top1}/${totals.n}  top3 ${totals.top3}/${totals.n}`);
 }
 
+console.log('\n(exit 0 expected for tier 2 weakness; tier 1 misses fail the run)');
 console.log('\n--- reading this ---');
 console.log('Tier 1 says the keyword channel is already strong on this corpus shape:');
 console.log('vectorText was written in the user\'s vocabulary, so most query words are');

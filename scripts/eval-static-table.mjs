@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { DATASETS, TIERS } from './datasets.mjs';
-import { BM25Index, tokenizePhonetic, rankItems } from '../search-core.js';
+import { createSparseIndex, rankItems } from '../search-core.js';
 import { DEFAULTS } from '../vector-combobox.js';
 import { decodeTable } from '../static-table.js';
 
@@ -52,6 +52,8 @@ const CONFIGS = [
   { name: 'static table only (no keywords)', mode: 'dense-only' },
   { name: 'table + BM25, ungated RRF (old behavior)', mode: 'hybrid', opts: { sparseMinCoverage: 0, genericDfFrac: 1 } },
   { name: 'table + BM25, component defaults', mode: 'hybrid' },
+  { name: 'table + BM25, phonetic union (historical)', mode: 'hybrid', opts: { phonetic: 'union' } },
+  { name: 'table + BM25, phonetic off', mode: 'hybrid', opts: { phonetic: 'off' } },
   { name: 'table + BM25, absolute cutoff (old)', mode: 'hybrid', opts: { thresholdMode: 'absolute' } },
 ];
 
@@ -85,10 +87,7 @@ for (const [dsName, { key, file }] of Object.entries(DATASET_FOR)) {
       `from ${file}.js — npm run build:tables`);
   }
 
-  const index = new BM25Index(items, {
-    tokenize: tokenizePhonetic,
-    genericDfFrac: DEFAULTS.genericDfFrac,
-  });
+  const index = createSparseIndex(items, DEFAULTS);
 
   console.log(`\n=== ${dsName} — ${values.length} options — ${artifact.embedder} ===`);
   console.log(`    artifact: ${kb.toFixed(1)} KB on disk (${artifact.stats.rowsKept} rows, ` +
@@ -102,12 +101,14 @@ for (const [dsName, { key, file }] of Object.entries(DATASET_FOR)) {
     console.log(`\n  ${tier.name}  (n=${tests.length})  table word coverage ${(cov * 100).toFixed(0)}%`);
     for (const cfg of CONFIGS) {
       const o = { ...DEFAULTS, ...(cfg.opts || {}) };
+      const ch = createSparseIndex(items, o);
+      const index2 = ch;
       const none = values.map(() => 0);
       const ranks = tests.map((t) => {
         const dense = cfg.mode === 'sparse-only' ? null : Array.from(table.scores(t.q));
-        const lex = cfg.mode === 'dense-only' ? none : index.scores(t.q);
-        const lexRank = cfg.mode === 'hybrid' ? index.scores(t.q, { informativeOnly: true }) : null;
-        const coverage = cfg.mode === 'hybrid' ? index.coverage(t.q) : null;
+        const lex = cfg.mode === 'dense-only' ? none : index2.scores(t.q);
+        const lexRank = cfg.mode === 'hybrid' ? index2.scores(t.q, { informativeOnly: true }) : null;
+        const coverage = cfg.mode === 'hybrid' ? index2.coverage(t.q) : null;
         return rankInOrder(rankItems(values.length, lex, dense, o, lexRank, coverage), values, t.targets);
       });
       const m = summarize(ranks);

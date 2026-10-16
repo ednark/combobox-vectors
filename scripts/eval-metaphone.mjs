@@ -12,15 +12,20 @@
 //   baseline  — current production tokenizer (lowercase, alnum, naive stem)
 //   union     — baseline tokens PLUS metaphone(stem(token)) keys, so exact
 //               matches keep their IDF precision while typo'd tokens still
-//               collide with the indexed phonetic key
+//               collide with the indexed phonetic key. Costs correctly spelled
+//               words their precision: each exact hit is double-counted by its own
+//               key, and 4-character keys collide with unrelated words.
 //   phonetic  — metaphone keys ONLY (govdoc's approach, maximally fuzzy)
+//   fallback  — exact tokens rank; a key is consulted ONLY for query tokens with
+//               df == 0 in this corpus, which is the shape of a typo
+//   fallback-half — same, with key matches weighted 0.5 of an exact term
 //
 // BM25 machinery is identical across variants (BM25Index injectable tokenizer).
 // Dense channel is intentionally absent — this isolates the sparse channel.
 //
 // Usage: npm run eval:metaphone
 
-import { BM25Index, tokenize } from '../vector-combobox.js';
+import { BM25Index, createSparseIndex, tokenize, tokenizePhonetic } from '../vector-combobox.js';
 import { metaphone } from '../metaphone.js';
 import { DATASETS } from './datasets.mjs';
 
@@ -33,10 +38,19 @@ const unionTokenizer = (text) => {
   return [...toks, ...toks.map(metaphone)];
 };
 
+// Variants are index *options*, not just tokenizers: 'fallback' cannot be
+// expressed as a tokenizer, because it needs to know which query tokens the index
+// has never seen (df == 0) before consulting a phonetic key.
 const VARIANTS = {
-  baseline: tokenize,
-  union: unionTokenizer,
-  phonetic: metaphoneTokenizer,
+  baseline: { build: (items) => new BM25Index(items, { tokenize }) },
+  union: { build: (items) => new BM25Index(items, { tokenize: unionTokenizer }) },
+  phonetic: { build: (items) => new BM25Index(items, { tokenize: metaphoneTokenizer }) },
+  // Exact tokens rank; metaphone keys are consulted only for tokens the corpus
+  // does not contain at all.
+  fallback: { build: (items) => createSparseIndex(items, { phonetic: 'fallback' }) },
+  // Fallback, but keys carry half a term's weight — collisions are weaker evidence
+  // than an exact spelling match.
+  'fallback-half': { build: (items) => createSparseIndex(items, { phonetic: 'fallback', phoneticWeight: 0.5 }) },
 };
 
 // Typo queries: realistic combobox-speed misspellings. Targets as in datasets.mjs.
@@ -108,10 +122,10 @@ function main() {
   // One index per (variant, dataset). Union doubles doc length; BM25's
   // length normalization absorbs that.
   const indexes = {};
-  for (const [variant, tok] of Object.entries(VARIANTS)) {
+  for (const [variant, v] of Object.entries(VARIANTS)) {
     indexes[variant] = {};
     for (const [ds, items] of Object.entries(DATASETS)) {
-      indexes[variant][ds] = new BM25Index(items, { tokenize: tok });
+      indexes[variant][ds] = v.build(items);
     }
   }
 

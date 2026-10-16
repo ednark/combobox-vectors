@@ -89,6 +89,20 @@ of stems share a metaphone key. Fallback keeps identical typo tolerance
 `phoneticWeight: 0.5` measured the same again, so the weight is available but not
 needed here.
 
+## The metric bug that produced two wrong conclusions
+
+`rankFromScores` used to compute rank as `1 + #{scores strictly greater}`, which for an
+all-zero vector returns **1** — a channel that produced no evidence at all was credited
+with a first-place answer. Same class as the `null <= 3` comparison bug in
+`eval-no-model.mjs`. Both are now prevented structurally: `scripts/metrics.mjs` is the
+only place that turns scores into ranks, it returns `null` for no-evidence, `summarize()`
+excludes nulls from top-1/top-3/MRR and reports `noEvidence` as its own bucket, and the
+report lines print it (e.g. `top1 7/14 ... (3 no evidence)`) so a channel resting on
+unanswered queries is visible instead of flattering.
+
+If a number in this project's history says "dense-only beats hybrid", assume this bug
+until re-measured on the rendered basis.
+
 ## What is still open
 
 0. **Re-benchmark `phonetic` per deployment.** All three modes tie on this corpus;
@@ -98,10 +112,15 @@ needed here.
 1. **Grow tier 2 into judged data.** 18 hand-written paraphrase queries are directional.
    Until then, treat fusion numbers as a signal, not a gate — the README's own warning
    about hand-tuned fusion weights applies to anything chosen on this set.
-2. **Why does hybrid still lose on paraphrases?** Dense-only table: 9/14 top-1 on the
-   agency tier-2 set; fused: 9/14 but top-3 9/14 vs 11/14. The keyword channel never
-   *helps* there. Worth one principled attempt (e.g. no sparse credit unless the match
-   is on a token absent from the dense channel's top candidate), then stop.
+2. **RESOLVED — hybrid does not lose on paraphrases; the measurement did.** Corrected
+   on the rendered basis: dense-only 19/28 · 24/28 (tier 1) and 9/18 · 11/18 (tier 2)
+   vs fused 24/28 · 28/28 and 11/18 · 12/18. The earlier "dense-only 10/14 top-1" was
+   an all-zero tie scored as rank 1 — 3 of 14 agency paraphrases have 0% table word
+   coverage, so the dense channel answered none of them. Remaining open question,
+   narrower and honest: fused tier-2 top-3 (12/18) still trails the model's 14/18, so
+   the keyword channel's value *on paraphrases* is unproven even though it no longer
+   harms. One principled attempt remains listed in README ("Still open"), and then
+   stop until there is judged data.
 3. **Column-count growth.** One column per option: 42 → 348 KB, 200 → ~1.6 MB at the
    same pruning. Row clustering (word → prototype, `vocab → prototype` map plus a
    `prototypes × options` matrix) is the next compression lever; measure the Pareto

@@ -32,6 +32,7 @@ import { gzipSync, brotliCompressSync } from 'node:zlib';
 import { DATASETS, TESTS, PARAPHRASE_TESTS, TIERS } from './datasets.mjs';
 import { decodeTable, tableWords } from '../static-table.js';
 import { createSparseIndex, rankItems } from '../search-core.js';
+import { rankFromScores, rankFromOrder, summarize, metricLine } from './metrics.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CACHE = join(ROOT, '.cache');
@@ -140,39 +141,6 @@ function loadDataset(name) {
       `embedding (e.g. "${String(missing[0]?.value).slice(0, 40)}") — npm run precompute`);
   }
   return { key, items, vectors: items.map((it) => emb[it.value]) };
-}
-
-// ---------- ranking metrics ----------
-function rankOf(scores, values, targets) {
-  let best = -Infinity;
-  for (let i = 0; i < values.length; i++) {
-    if (targets.some((t) => values[i].startsWith(t)) && scores[i] > best) best = scores[i];
-  }
-  if (best === -Infinity) return values.length + 1;
-  let better = 0;
-  for (const s of scores) if (s > best) better += 1;
-  return better + 1;
-}
-
-// Rank of the intended option inside an already-ordered list of indices.
-function rankInOrder(order, values, targets) {
-  const pos = order.findIndex((i) => targets.some((t) => values[i].startsWith(t)));
-  return pos === -1 ? values.length + 1 : pos + 1;
-}
-
-function summarize(ranks) {
-  const n = ranks.length;
-  return {
-    n,
-    top1: ranks.filter((r) => r === 1).length,
-    top3: ranks.filter((r) => r <= 3).length,
-    mrr: ranks.reduce((a, r) => a + 1 / Math.min(r, n), 0) / n,
-  };
-}
-
-function line(tag, m) {
-  return `  ${tag.padEnd(42)} top1 ${String(m.top1).padStart(2)}/${String(m.n).padStart(2)}  ` +
-    `top3 ${String(m.top3).padStart(2)}/${m.n}  MRR ${m.mrr.toFixed(3)}`;
 }
 
 // ---------- build ----------
@@ -410,11 +378,11 @@ function verify({ artifact, reference, values, items, key }) {
       const modelOf = (t) => reference(t.q) ?? values.map(() => 0);
       rows.push({
         label: c.name,
-        table: summarize(tests.map((t) => rankInOrder(
+        table: summarize(tests.map((t) => rankFromOrder(
           rankItems(values.length, gateIdx.get(0.34).scores(t.q), denseOf(t), opts,
             gateIdx.get(0.34).scores(t.q, { informativeOnly: true }), gateIdx.get(0.34).coverage(t.q)),
           values, t.targets))),
-        model: summarize(tests.map((t) => rankInOrder(
+        model: summarize(tests.map((t) => rankFromOrder(
           rankItems(values.length, gateIdx.get(0.34).scores(t.q), modelOf(t), opts,
             gateIdx.get(0.34).scores(t.q, { informativeOnly: true }), gateIdx.get(0.34).coverage(t.q)),
           values, t.targets))),
@@ -428,29 +396,29 @@ function verify({ artifact, reference, values, items, key }) {
     const tests = tier.tests.filter((t) => t.ds === key);
     if (!tests.length) continue;
 
-    const denseRanks = tests.map((t) => rankOf(reference(t.q) ?? [], values, t.targets));
-    const tabRanks = tests.map((t) => rankOf(denseScores(t.q), values, t.targets));
-    const fusRanks = tests.map((t) => rankInOrder(fusedRanks(t.q), values, t.targets));
-    const fusRanksAbs = tests.map((t) => rankInOrder(fusedRanksAbs(t.q), values, t.targets));
+    const denseRanks = tests.map((t) => rankFromScores(reference(t.q) ?? [], values, t.targets));
+    const tabRanks = tests.map((t) => rankFromScores(denseScores(t.q), values, t.targets));
+    const fusRanks = tests.map((t) => rankFromOrder(fusedRanks(t.q), values, t.targets));
+    const fusRanksAbs = tests.map((t) => rankFromOrder(fusedRanksAbs(t.q), values, t.targets));
     const gateRows = GATE_FRACS.map((frac) => ({
       frac,
-      table: summarize(tests.map((t) => rankInOrder(gated(frac, t.q, denseScores(t.q)), values, t.targets))),
-      model: summarize(tests.map((t) => rankInOrder(
+      table: summarize(tests.map((t) => rankFromOrder(gated(frac, t.q, denseScores(t.q)), values, t.targets))),
+      model: summarize(tests.map((t) => rankFromOrder(
         gated(frac, t.q, reference(t.q) ?? values.map(() => 0)), values, t.targets))),
       // Weighted (score-normalized) fusion, same gate: a strong dense margin can
       // outrank a weak keyword hit, which RRF's flat 1/(60+rank) cannot.
-      wtable: summarize(tests.map((t) => rankInOrder(
+      wtable: summarize(tests.map((t) => rankFromOrder(
         gated(frac, t.q, denseScores(t.q), WEIGHT_OPTS), values, t.targets))),
-      wmodel: summarize(tests.map((t) => rankInOrder(
+      wmodel: summarize(tests.map((t) => rankFromOrder(
         gated(frac, t.q, reference(t.q) ?? values.map(() => 0), WEIGHT_OPTS), values, t.targets))),
     }));
     // Same fusion, but with the EXACT embedder as the dense channel: if the
     // thresholded eligibility rule costs the model path the same ground, the loss
     // belongs to the rule, not to the table.
-    const refFusRanks = tests.map((t) => rankInOrder(
+    const refFusRanks = tests.map((t) => rankFromOrder(
       rankItems(values.length, bm25.scores(t.q), reference(t.q) ?? values.map(() => 0), RANK_OPTS),
       values, t.targets));
-    const refFusAbsRanks = tests.map((t) => rankInOrder(
+    const refFusAbsRanks = tests.map((t) => rankFromOrder(
       rankItems(values.length, bm25.scores(t.q), reference(t.q) ?? values.map(() => 0), RANK_OPTS_ABS),
       values, t.targets));
     const scaleCheck = tests.map((t) => {
@@ -467,20 +435,20 @@ function verify({ artifact, reference, values, items, key }) {
     const cov = tests.reduce((a, t) => a + table.coverage(t.q), 0) / tests.length;
 
     console.log(`  ${tier.name} — table word coverage ${(cov * 100).toFixed(0)}%`);
-    console.log(line('    reference: exact fp64 static embedder', summarize(denseRanks)));
-    console.log(line('    reference: model + BM25, absolute cutoff', summarize(refFusAbsRanks)));
-    console.log(line('    reference: model + BM25, relative cutoff', summarize(refFusRanks)));
-    console.log(line('    artifact : int8 static table', summarize(tabRanks)));
-    console.log(line('    artifact : table + BM25, ungated fusion', summarize(fusRanksAbs)));
-    console.log(line('    artifact : table + BM25, ungated (rel cutoff)', summarize(fusRanks)));
+    console.log(metricLine('    reference: exact fp64, full ranking', summarize(denseRanks)));
+    console.log(metricLine('    reference: model + BM25, absolute cutoff', summarize(refFusAbsRanks)));
+    console.log(metricLine('    reference: model + BM25, relative cutoff', summarize(refFusRanks)));
+    console.log(metricLine('    artifact : int8 table, full ranking', summarize(tabRanks)));
+    console.log(metricLine('    artifact : table + BM25, ungated fusion', summarize(fusRanksAbs)));
+    console.log(metricLine('    artifact : table + BM25, ungated (rel cutoff)', summarize(fusRanks)));
     for (const row of gateRows) {
-      console.log(line(`    artifact : RRF gated, df<=${row.frac.toFixed(2)}`, row.table));
-      console.log(line(`    reference: RRF gated, df<=${row.frac.toFixed(2)}`, row.model));
+      console.log(metricLine(`    artifact : RRF gated, df<=${row.frac.toFixed(2)}`, row.table));
+      console.log(metricLine(`    reference: RRF gated, df<=${row.frac.toFixed(2)}`, row.model));
     }
     console.log('    — sparse-channel weighting sweep (df<=0.34 gate) —');
     for (const row of covSweepFor(tests)) {
-      console.log(line(`    artifact : ${row.label}`, row.table));
-      console.log(line(`    reference: ${row.label}`, row.model));
+      console.log(metricLine(`    artifact : ${row.label}`, row.table));
+      console.log(metricLine(`    reference: ${row.label}`, row.model));
     }
     const below = scaleCheck.filter((x) => x.refMax < RANK_OPTS.threshold).length;
     console.log(`    top-1 identical to reference: ${agree}/${tests.length}   ` +

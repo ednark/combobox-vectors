@@ -151,10 +151,16 @@ Measured on the two demo datasets, 46 queries (component defaults, `npm run eval
 
 | dense source                  | bytes                 | tier 1 top-1 | tier 1 top-3 | tier 2 top-1 | tier 2 top-3 |
 |-------------------------------|-----------------------|--------------|--------------|--------------|--------------|
-| none (BM25 only) | 0 | 23/28 | 28/28 | 7/18 | 9/18 |
+| none (BM25 only) | 0 | 23/28 | 28/28 | 5/18 | 8/18 |
 | static table only | 348 KB + 157 KB | 19/28 | 24/28 | 9/18 | 11/18 |
-| **table + BM25 (shipped default)** | ~505 KB | **24/28** | **28/28** | **11/18** | **13/18** |
+| **table + BM25 (shipped default)** | ~505 KB | **24/28** | **28/28** | **11/18** | **12/18** |
 | 15 MB model + BM25 | ~16.3 MB | 24/28 | 27/28 | 10/18 | 14/18 |
+
+All four rows are on one basis: the **rendered** list — the component's own `threshold`
+and `maxResults`, so "top-3" means "inside the dropdown a user sees". The full-ordering
+basis (`node scripts/eval-static-table.mjs --uncapped`) yields different numbers, and
+comparing a capped row against an uncapped one is how a false conclusion got published
+here once — see `scripts/metrics.mjs`.
 
 The static table matches the model it replaces on the in-vocabulary tier and beats it
 on the paraphrase tier, at roughly 1/45th the bytes — because spread-pruning also
@@ -312,6 +318,7 @@ search toggle for A/B testing dense vs keyword-only ranking.
 - `scripts/eval-metaphone.mjs` — phonetic tokenizer evaluation
 - `scripts/eval-no-model.mjs` — the keyword-only baseline, both query tiers
 - `scripts/eval-static-table.mjs` — score the static table through the real fusion
+- `scripts/metrics.mjs` — shared ranking metrics; enforces "no evidence is not rank 1"
 - `scripts/smoke.mjs` — headless DOM check of wiring (needs `npm i --no-save jsdom`)
 
 ## What's still open
@@ -324,11 +331,19 @@ search toggle for A/B testing dense vs keyword-only ranking.
   Every model/size/pruning decision made before this was made blind to that gap.
 - **Tier 2 is 18 hand-written queries.** Directions, not a gate. Growing it into
   relevance-judged data is the prerequisite for the fusion-tuning item below.
-- **Hybrid still loses ground on paraphrases.** Dense-only table measures 9/18 top-1
-  on tier 2; fused it is 11/18 overall but the keyword channel is never *helping*
-  there. The df gate, the term-coverage cliff and evidence-proportional weighting
-  (`sparseConfidence`) were all measured; the cliff won, and none of them closes the
-  gap. This is fusion-design territory that wants judged data, not another sweep.
+- **Closed: "hybrid loses to dense-only on paraphrases" was a measurement bug — mine.**
+  On the rendered basis the shipped fusion beats the dense channel alone on both tiers:
+  tier 1 19/28 → 24/28 top-1, tier 2 9/18 → 11/18. The claim came from a helper that
+  scored an all-zero vector as rank 1, so 3 of 14 agency paraphrases with 0% table word
+  coverage — queries the dense channel could not answer at all — were counted as
+  dense-only *wins*. `scripts/metrics.mjs` now owns that rule (no evidence is not rank
+  1) and prints the no-evidence bucket so a flattering number is visible.
+- **Still open: the keyword channel never *helps* on tier 2.** Fused tier-2 top-3 is
+  12/18 against the 15 MB model's 14/18, so paraphrase ranking remains the dense
+  channel's job; the hybrid's contribution there is "does not harm", not "improves".
+  Measured so far: df informativeness gate, term-coverage cliff (shipped),
+  evidence-proportional `sparseConfidence`, weighted fusion. A fourth sweep on 18
+  hand-written queries is not the answer — this wants judged relevance data.
 - **Stop words are doing real work at this corpus size.** `genericDfFrac` cannot
   identify "the" in 42 documents (it appears in only 8), and before the stop-word
   list a query's keyword ranking could be decided by that one word. A corpus with

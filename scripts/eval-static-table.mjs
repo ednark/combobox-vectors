@@ -12,8 +12,17 @@
 //
 // Zero dependencies, runs offline, no model download.
 //
-// Usage: npm run eval:table      (or: node scripts/eval-static-table.mjs)
-//        node scripts/eval-static-table.mjs --keep-sweep 5,10,25,50
+// Usage: npm run eval:table
+//        node scripts/eval-static-table.mjs [--uncapped]
+//
+// Two measurement bases, and confusing them produced a wrong conclusion once
+// already, so pick explicitly:
+//   default  — the RENDERED list: rankItems with the component's threshold and
+//              maxResults, i.e. "does the dropdown a user sees contain the answer"
+//   --uncapped — threshold 0 and maxResults = option count, i.e. the full
+//              ordering of all options. Comparing a capped number to an uncapped
+//              one makes hybrid look better or worse than it is depending on which
+//              side of the comparison got capped.
 
 import { readFileSync, statSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -56,6 +65,9 @@ const CONFIGS = [
   { name: 'table + BM25, phonetic off', mode: 'hybrid', opts: { phonetic: 'off' } },
   { name: 'table + BM25, absolute cutoff (old)', mode: 'hybrid', opts: { thresholdMode: 'absolute' } },
 ];
+
+// --uncapped: measure the full ordering instead of the rendered top-N list.
+const UNCAPPED = process.argv.includes('--uncapped');
 
 function loadArtifact(file) {
   const p = join(ROOT, `${file}.semantic.json`);
@@ -100,7 +112,11 @@ for (const [dsName, { key, file }] of Object.entries(DATASET_FOR)) {
     const cov = tests.reduce((a, t) => a + table.coverage(t.q), 0) / tests.length;
     console.log(`\n  ${tier.name}  (n=${tests.length})  table word coverage ${(cov * 100).toFixed(0)}%`);
     for (const cfg of CONFIGS) {
-      const o = { ...DEFAULTS, ...(cfg.opts || {}) };
+      const o = {
+        ...DEFAULTS,
+        ...(UNCAPPED ? { threshold: 0, maxResults: values.length } : {}),
+        ...(cfg.opts || {}),
+      };
       const ch = createSparseIndex(items, o);
       const index2 = ch;
       const none = values.map(() => 0);
@@ -118,7 +134,7 @@ for (const [dsName, { key, file }] of Object.entries(DATASET_FOR)) {
   }
 }
 
-console.log('\n--- reading this ---');
+console.log(`\n--- reading this (${UNCAPPED ? 'UNCAPPED: full ordering of all options' : 'RENDERED: component threshold + maxResults'}) ---`);
 console.log('The semantic table must land near the 15 MB model it replaces on tier 1,');
 console.log('and it is on tier 2 that a semantic channel earns its bytes. Tier 2 is 18');
 console.log('hand-written queries: treat movement as directional, not as a gate.');
